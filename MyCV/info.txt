@@ -1,38 +1,206 @@
-Liquibase and Flyway are both open-source database migration tools that help manage and apply database schema changes. They are designed to facilitate the version control of database schemas, allowing teams to apply incremental changes to the database in a consistent and controlled manner. While both tools share the same goal, there are some differences in their approach, features, and usability. Here's a comparison:
+environment {
+        // Path to the version file
+        VERSION_FILE = 'version.txt'
+    }
 
-### Approach and Philosophy
+stage('Increment Version') {
+            steps {
+                script {
+                    // Read the current version from the file
+                    def currentVersion = readFile(env.VERSION_FILE).trim()
+                    echo "Current Version: ${currentVersion}"
 
-- **Liquibase** uses an XML, YAML, JSON, or SQL format to define database changes. It emphasizes a more abstract way of defining changes, aiming to be database agnostic. Liquibase tracks changes through a DATABASECHANGELOG table and supports a wide range of databases.
-- **Flyway** focuses on using plain SQL scripts for defining changes, advocating simplicity and control through raw SQL with the option to use Java for more complex migrations. It tracks migrations using a schema history table (by default named `flyway_schema_history`). Flyway's approach is more straightforward for those who prefer working directly with SQL.
+                    // Increment the minor version. Adjust the indexing if your version format is different.
+                    def versionParts = currentVersion.tokenize('.')
+                    def major = versionParts[0]
+                    def minor = versionParts[1].toInteger() + 1
+                    def patch = versionParts[2]
+                    def newVersion = "${major}.${minor}.${patch}"
+                    env.VERSION = newVersion // Set the new version in an environment variable
+                    echo "New Version: ${newVersion}"
 
-### Features
+                    // Write the new version back to the version file
+                    writeFile file: env.VERSION_FILE, text: newVersion
+                }
+            }
+        }
 
-- **Database Support**: Both tools support a wide range of SQL databases. Liquibase generally offers broader support for non-relational databases compared to Flyway.
-- **Configuration**: Liquibase configurations can be defined in XML, YAML, JSON, and SQL, offering flexibility in how changes are expressed. Flyway primarily uses SQL but also supports Java-based migrations for complex scenarios.
-- **Community and Enterprise Editions**: Both tools offer Community (free) and Enterprise (paid) versions. The Enterprise versions come with additional features and support options.
-- **Rollbacks**: Liquibase provides built-in support for automatic rollbacks using the same change logs, whereas Flyway’s Community Edition requires manually creating undo scripts for rollbacks, and its Enterprise Edition supports automatic rollbacks.
-- **Integration and Usage**: Both can be integrated into application build tools like Maven and Gradle, and both offer command-line interfaces. The choice between them can depend on the team's familiarity with these tools and the specific project requirements.
+-----
+package main
 
-### Usability
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "time"
+    "os"
 
-- **Learning Curve**: Flyway is often considered easier to start with, especially for teams that are comfortable with SQL and prefer a straightforward approach to database migrations. Liquibase's abstracted approach offers flexibility but might have a steeper learning curve for some users.
-- **Community and Documentation**: Both tools have strong communities and comprehensive documentation. However, the simplicity of Flyway makes it easier for many users to find solutions to common problems.
+    "github.com/joho/godotenv"
+    "go.mongodb.org/mongo-driver/bson"
+    "go.mongodb.org/mongo-driver/mongo"
+    "go.mongodb.org/mongo-driver/mongo/options"
+)
 
-### Best Use Cases
+func setAllValuesToTrue(search bson.M) bson.M {
+    for key := range search {
+        switch search[key].(type) {
+        case bson.M:
+            // If the value is a nested document, recursively set its values to true
+            search[key] = setAllValuesToTrue(search[key].(bson.M))
+        default:
+            // Set the value to true
+            search[key] = true
+        }
+    }
+    return search
+}
 
-- **Liquibase** is well-suited for projects that require managing database schema changes across multiple types of databases or for teams that prefer a more abstract and flexible approach to defining migrations.
-- **Flyway** is ideal for projects where migrations are primarily defined through SQL, and there is a strong emphasis on simplicity and direct control over database changes.
+func updateDocumentsInBatches(collection *mongo.Collection, batchSize int) {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
 
-In summary, the choice between Liquibase and Flyway often comes down to personal preference, project requirements, and the specific database environments in use. Teams that prefer working directly with SQL and value simplicity might lean towards Flyway, while those looking for a more flexible, format-agnostic tool might prefer Liquibase.
+    cursor, err := collection.Find(ctx, bson.M{"search": bson.M{"$exists": true}})
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cursor.Close(ctx)
 
---
-Which of these tools is more suitable for MongoDB?
+    count := 0
+    var documents []interface{}
+    for cursor.Next(ctx) {
+        var document bson.M
+        if err := cursor.Decode(&document); err != nil {
+            log.Fatal(err)
+        }
 
-For MongoDB, which is a NoSQL database, the choice between Liquibase and Flyway requires considering their support for NoSQL databases, especially since these tools were originally designed for SQL databases.
+        // Update the `search` field
+        document["search"] = setAllValuesToTrue(document["search"].(bson.M))
 
-**Liquibase** has broader support for NoSQL databases, including MongoDB. It has dedicated support for MongoDB, allowing you to manage your MongoDB schema changes using the same methodologies you would apply to SQL databases but tailored to the capabilities and operations common in NoSQL environments. Liquibase's approach to database migration, which is not strictly tied to SQL and allows for defining changes in formats like XML, YAML, and JSON, fits well with the document-oriented nature of MongoDB. This flexibility makes Liquibase a more suitable tool for managing migrations in MongoDB.
+        // Prepare the update model for bulk write
+        filter := bson.M{"_id": document["_id"]}
+        update := bson.M{"$set": bson.M{"search": document["search"]}}
+        model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
+        documents = append(documents, model)
 
-**Flyway**, on the other hand, is primarily focused on SQL databases. Its core functionality and approach are built around SQL scripts, which makes it less suitable for managing migrations in a NoSQL database like MongoDB. While Flyway is excellent for relational database management systems (RDBMS), its support for NoSQL databases is limited, and it may not be the best tool for MongoDB migration tasks.
+        if len(documents) >= batchSize {
+            // Perform the batch update
+            _, err := collection.BulkWrite(ctx, documents)
+            if err != nil {
+                log.Fatal(err)
+            }
+            documents = documents[:0] // Clear the slice for next batch
+            fmt.Printf("Updated a batch of %d documents\n", batchSize)
+        }
 
-Given the context and the need for managing database schema changes in MongoDB, **Liquibase** is the more suitable tool because of its explicit support for MongoDB. Liquibase allows you to define changes in a way that respects MongoDB's schema-less nature, offering operations that are relevant to document-oriented data structures (e.g., adding a field to documents in a collection) while still tracking those changes in a managed and version-controlled manner.
+        count++
+    }
+
+    if len(documents) > 0 {
+        // Update any remaining documents
+        _, err := collection.BulkWrite(ctx, documents)
+        if err != nil {
+            log.Fatal(err)
+        }
+    }
+
+    fmt.Printf("Total documents updated: %d\n", count)
+}
+
+func updateAndUpsertDocuments(collection *mongo.Collection, targetCollection *mongo.Collection, batchSize int) {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+
+    // Calculate the timestamp for 15 minutes ago for the upsert operation
+    fifteenMinsAgo := time.Now().Add(-15 * time.Minute)
+
+    // Define a filter to either update documents with a 'search' field or upsert documents based on 'Timestamp'
+    filter := bson.M{
+        "$and": []bson.M{
+            {"search": bson.M{"$exists": true}},
+            {"Timestamp": bson.M{"$gte": fifteenMinsAgo}},
+        },
+    }
+
+    cursor, err := collection.Find(ctx, filter)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cursor.Close(ctx)
+
+    var models []mongo.WriteModel
+    for cursor.Next(ctx) {
+        var document bson.M
+        if err := cursor.Decode(&document); err != nil {
+            log.Fatal(err)
+        }
+
+        // Remove the _id field to avoid duplicate key error during upsert
+        delete(document, "_id")
+
+        // If document contains 'search', update 'search' values to true
+        if search, ok := document["search"].(bson.M); ok {
+            document["search"] = setAllValuesToTrue(search)
+
+            // Prepare the update model for bulk write
+            filter := bson.M{"_id": document["_id"]}
+            update := bson.M{"$set": bson.M{"search": document["search"]}}
+            model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
+            models = append(models, model)
+        }
+
+        // If document's 'Timestamp' is within the last 15 minutes, upsert it into the target collection
+        if timestamp, ok := document["Timestamp"].(time.Time); ok && timestamp.After(fifteenMinsAgo) {
+            // Prepare the upsert model for bulk write
+            // Use a distinctive field or combination of fields as the filter for upserting
+            upsertFilter := bson.M{"Timestamp": document["Timestamp"]}
+            upsertUpdate := bson.M{"$setOnInsert": document}
+            model := mongo.NewUpdateOneModel().SetFilter(upsertFilter).SetUpdate(upsertUpdate).SetUpsert(true)
+            models = append(models, model)
+        }
+
+        if len(models) >= batchSize {
+            // Perform the batch operation
+            _, err := targetCollection.BulkWrite(ctx, models)
+            if err != nil {
+                log.Fatal(err)
+            }
+            models = models[:0] // Clear the slice for next batch
+            fmt.Println("Processed a batch")
+        }
+    }
+
+    if len(models) > 0 {
+        // Process any remaining documents
+        _, err := targetCollection.BulkWrite(ctx, models)
+        if err != nil {
+            log.Fatal(err)
+        }
+    }
+
+    fmt.Println("Document processing complete")
+}
+
+func main() {
+    if err := godotenv.Load(); err != nil {
+        log.Println("No .env file found")
+    }
+    uri := os.Getenv("MONGODB_URI")
+    if uri == "" {
+        log.Fatal("You must set your 'MONGODB_URI' environment variable. See\n\t https://www.mongodb.com/docs/drivers/go/current/usage-examples/#environment-variable")
+    }
+
+    clientOptions := options.Client().ApplyURI(uri)
+    client, err := mongo.Connect(context.TODO(), clientOptions)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Replace "yourDatabase", "yourSourceCollection", and "request" with actual names
+    srcCollection := client.Database("yourDatabase").Collection("yourSourceCollection")
+    targetCollection := client.Database("yourDatabase").Collection("request")
+
+    // Assuming a batch size of 100
+    updateAndUpsertDocuments(srcCollection, targetCollection, 100)
+}
 
