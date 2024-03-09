@@ -1,126 +1,46 @@
-environment {
-        // Path to the version file
-        VERSION_FILE = 'version.txt'
-    }
-
-stage('Increment Version') {
-            steps {
-                script {
-                    // Read the current version from the file
-                    def currentVersion = readFile(env.VERSION_FILE).trim()
-                    echo "Current Version: ${currentVersion}"
-
-                    // Increment the minor version. Adjust the indexing if your version format is different.
-                    def versionParts = currentVersion.tokenize('.')
-                    def major = versionParts[0]
-                    def minor = versionParts[1].toInteger() + 1
-                    def patch = versionParts[2]
-                    def newVersion = "${major}.${minor}.${patch}"
-                    env.VERSION = newVersion // Set the new version in an environment variable
-                    echo "New Version: ${newVersion}"
-
-                    // Write the new version back to the version file
-                    writeFile file: env.VERSION_FILE, text: newVersion
-                }
-            }
-        }
-
------
 package main
 
 import (
     "context"
-    "encoding/json"
     "fmt"
     "log"
-    "time"
-    "os"
 
-    "github.com/joho/godotenv"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/mongo"
     "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func setAllValuesToTrue(search bson.M) bson.M {
-    for key := range search {
-        switch search[key].(type) {
+// flattenSearchValues updates the search object to have all values set to true,
+// and flattens nested objects using dot notation for the keys.
+func flattenSearchValues(search bson.M, prefix string) bson.M {
+    flatSearch := bson.M{}
+    for key, value := range search {
+        // Construct new key using prefix, if provided
+        newKey := key
+        if prefix != "" {
+            newKey = prefix + "." + key
+        }
+
+        switch v := value.(type) {
         case bson.M:
-            // If the value is a nested document, recursively set its values to true
-            search[key] = setAllValuesToTrue(search[key].(bson.M))
-        default:
-            // Set the value to true
-            search[key] = true
-        }
-    }
-    return search
-}
-
-func updateDocumentsInBatches(collection *mongo.Collection, batchSize int) {
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-    defer cancel()
-
-    cursor, err := collection.Find(ctx, bson.M{"search": bson.M{"$exists": true}})
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer cursor.Close(ctx)
-
-    count := 0
-    var documents []interface{}
-    for cursor.Next(ctx) {
-        var document bson.M
-        if err := cursor.Decode(&document); err != nil {
-            log.Fatal(err)
-        }
-
-        // Update the `search` field
-        document["search"] = setAllValuesToTrue(document["search"].(bson.M))
-
-        // Prepare the update model for bulk write
-        filter := bson.M{"_id": document["_id"]}
-        update := bson.M{"$set": bson.M{"search": document["search"]}}
-        model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
-        documents = append(documents, model)
-
-        if len(documents) >= batchSize {
-            // Perform the batch update
-            _, err := collection.BulkWrite(ctx, documents)
-            if err != nil {
-                log.Fatal(err)
+            // Recursively process nested objects
+            for k, val := range flattenSearchValues(v, newKey) {
+                flatSearch[k] = val
             }
-            documents = documents[:0] // Clear the slice for next batch
-            fmt.Printf("Updated a batch of %d documents\n", batchSize)
-        }
-
-        count++
-    }
-
-    if len(documents) > 0 {
-        // Update any remaining documents
-        _, err := collection.BulkWrite(ctx, documents)
-        if err != nil {
-            log.Fatal(err)
+        default:
+            // Set value to true for non-object values
+            flatSearch[newKey] = true
         }
     }
-
-    fmt.Printf("Total documents updated: %d\n", count)
+    return flatSearch
 }
 
-func updateAndUpsertDocuments(collection *mongo.Collection, targetCollection *mongo.Collection, batchSize int) {
+func upsertDocuments(collection *mongo.Collection, targetCollection *mongo.Collection) {
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
     defer cancel()
 
-    // Calculate the timestamp for 15 minutes ago for the upsert operation
-    fifteenMinsAgo := time.Now().Add(-15 * time.Minute)
-
-    // Define a filter to either update documents with a 'search' field or upsert documents based on 'Timestamp'
-    filter := bson.M{
-        "$and": []bson.M{
-            {"search": bson.M{"$exists": true}},
-            {"Timestamp": bson.M{"$gte": fifteenMinsAgo}},
-        },
-    }
+    // Query to find documents with "search" field
+    filter := bson.M{"search": bson.M{"$exists": true}}
 
     cursor, err := collection.Find(ctx, filter)
     if err != nil {
@@ -128,79 +48,95 @@ func updateAndUpsertDocuments(collection *mongo.Collection, targetCollection *mo
     }
     defer cursor.Close(ctx)
 
-    var models []mongo.WriteModel
     for cursor.Next(ctx) {
         var document bson.M
         if err := cursor.Decode(&document); err != nil {
             log.Fatal(err)
         }
 
-        // Remove the _id field to avoid duplicate key error during upsert
-        delete(document, "_id")
-
-        // If document contains 'search', update 'search' values to true
         if search, ok := document["search"].(bson.M); ok {
-            document["search"] = setAllValuesToTrue(search)
+            flattenedSearch := flattenSearchValues(search, "")
 
-            // Prepare the update model for bulk write
-            filter := bson.M{"_id": document["_id"]}
-            update := bson.M{"$set": bson.M{"search": document["search"]}}
-            model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
-            models = append(models, model)
-        }
+            // Prepare the document for upserting with the flattened 'search' field
+            update := bson.M{"$set": bson.M{"search": flattenedSearch}}
+            if client, ok := document["client"]; ok {
+                update["$set"].(bson.M)["client"] = client
+            }
+            if url, ok := document["url"]; ok {
+                update["$set"].(bson.M)["url"] = url
+            }
 
-        // If document's 'Timestamp' is within the last 15 minutes, upsert it into the target collection
-        if timestamp, ok := document["Timestamp"].(time.Time); ok && timestamp.After(fifteenMinsAgo) {
-            // Prepare the upsert model for bulk write
-            // Use a distinctive field or combination of fields as the filter for upserting
-            upsertFilter := bson.M{"Timestamp": document["Timestamp"]}
-            upsertUpdate := bson.M{"$setOnInsert": document}
-            model := mongo.NewUpdateOneModel().SetFilter(upsertFilter).SetUpdate(upsertUpdate).SetUpsert(true)
-            models = append(models, model)
-        }
-
-        if len(models) >= batchSize {
-            // Perform the batch operation
-            _, err := targetCollection.BulkWrite(ctx, models)
+            options := options.Update().SetUpsert(true)
+            _, err = targetCollection.UpdateOne(ctx, bson.M{"_id": document["_id"]}, update, options)
             if err != nil {
                 log.Fatal(err)
             }
-            models = models[:0] // Clear the slice for next batch
-            fmt.Println("Processed a batch")
         }
     }
 
-    if len(models) > 0 {
-        // Process any remaining documents
-        _, err := targetCollection.BulkWrite(ctx, models)
-        if err != nil {
-            log.Fatal(err)
-        }
+    if err := cursor.Err(); err != nil {
+        log.Fatal(err)
     }
 
-    fmt.Println("Document processing complete")
+    fmt.Println("Documents upserted with flattened 'search'")
+}
+
+func groupByClientAndUrlAndMerge(collection *mongo.Collection) {
+    ctx := context.TODO()
+
+    pipeline := mongo.Pipeline{
+        {
+            {"$group": bson.D{
+                {"_id", bson.D{{"client", "$client"}, {"url", "$url"}}},
+                {"count", bson.D{{"$sum", 1}}},
+            }},
+        },
+        {
+            {"$merge": bson.D{
+                {"into", "aggregatedResults"}, // Specify the target collection for the merge
+                // Optional specifications like "on", "whenMatched", "whenNotMatched" can be added here
+            }},
+        },
+    }
+
+    cursor, err := collection.Aggregate(ctx, pipeline)
+    if err != nil {
+        log.Fatal("Aggregation error:", err)
+    }
+    defer cursor.Close(ctx)
+
+    fmt.Println("Aggregation with $merge completed, documents are now in 'aggregatedResults' collection.")
+}
+
+func dropRequestCollection(db *mongo.Database) {
+    ctx := context.TODO()
+
+    err := db.Collection("request").Drop(ctx)
+    if err != nil {
+        log.Fatal("Error dropping 'request' collection:", err)
+    }
+
+    fmt.Println("'request' collection dropped.")
 }
 
 func main() {
-    if err := godotenv.Load(); err != nil {
-        log.Println("No .env file found")
-    }
-    uri := os.Getenv("MONGODB_URI")
-    if uri == "" {
-        log.Fatal("You must set your 'MONGODB_URI' environment variable. See\n\t https://www.mongodb.com/docs/drivers/go/current/usage-examples/#environment-variable")
-    }
-
-    clientOptions := options.Client().ApplyURI(uri)
+    clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
     client, err := mongo.Connect(context.TODO(), clientOptions)
     if err != nil {
         log.Fatal(err)
     }
 
-    // Replace "yourDatabase", "yourSourceCollection", and "request" with actual names
-    srcCollection := client.Database("yourDatabase").Collection("yourSourceCollection")
-    targetCollection := client.Database("yourDatabase").Collection("request")
+    // Ensure the database name is correct
+    db := client.Database("stats")
 
-    // Assuming a batch size of 100
-    updateAndUpsertDocuments(srcCollection, targetCollection, 100)
+    srcCollection := db.Collection("yourSourceCollection")
+    requestCollection := db.Collection("request")
+
+    upsertDocuments(srcCollection, requestCollection)
+
+    // Perform aggregation with $merge into 'aggregatedResults'
+    groupByClientAndUrlAndMerge(requestCollection)
+
+    // Optionally, drop the 'request' collection after aggregation is done
+    dropRequestCollection(db)
 }
-
