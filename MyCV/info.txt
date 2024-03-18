@@ -16,6 +16,52 @@ import (
     "go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// This function is intended to process any MongoDB query operators found,
+// including $elemMatch, and to flatten the structure appropriately.
+func processQueryOperators(data interface{}, parentKey string) bson.M {
+    flat := bson.M{}
+
+    switch v := data.(type) {
+    case map[string]interface{}:
+        for key, value := range v {
+            fullKey := parentKey
+            if parentKey != "" {
+                fullKey += "."
+            }
+            fullKey += key
+
+            if key == "$elemMatch" {
+                // For $elemMatch, process the nested map and append its fields to the parent key
+                nestedFlat := processQueryOperators(value, "")
+                for nestedKey, nestedVal := range nestedFlat {
+                    compositeKey := parentKey + "." + nestedKey
+                    flat[compositeKey] = nestedVal
+                }
+            } else {
+                // Recursively process other keys
+                for nestedKey, nestedVal := range processQueryOperators(value, fullKey) {
+                    flat[nestedKey] = nestedVal
+                }
+            }
+        }
+
+    case []interface{}:
+        // Process each item in the slice
+        for i, item := range v {
+            indexedKey := parentKey + fmt.Sprintf("[%d]", i)
+            for nestedKey, nestedVal := range processQueryOperators(item, indexedKey) {
+                flat[nestedKey] = nestedVal
+            }
+        }
+
+    default:
+        // If not a map or slice, set the value directly
+        flat[parentKey] = true
+    }
+
+    return flat
+}
+
 // flattenSearchValues takes an interface{} and a prefix string, returning a bson.M.
 // It recursively flattens nested maps and arrays into a flat bson.M structure with dot-notated keys.
 func flattenSearchValues(data interface{}, prefix string) bson.M {
