@@ -9,38 +9,55 @@ import (
     "regexp"
     "strings"
     "time"
+    "reflect"
 
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/mongo"
     "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func flattenSearchValues(data interface{}, prefix string) map[string]interface{} {
-    flatSearch := make(map[string]interface{})
+// flattenSearchValues takes an interface{} and a prefix string, returning a bson.M.
+// It recursively flattens nested maps and arrays into a flat bson.M structure with dot-notated keys.
+func flattenSearchValues(data interface{}, prefix string) bson.M {
+    flatSearch := bson.M{}
 
-    // Check the type of data: if it's a map, process normally; if it's a slice, iterate over it.
-    switch v := data.(type) {
-    case map[string]interface{}: // Original case for handling objects
-        for key, value := range v {
-            newKey := key
+    reflectData := reflect.ValueOf(data)
+    switch reflectData.Kind() {
+    case reflect.Map:
+        for _, key := range reflectData.MapKeys() {
+            val := reflectData.MapIndex(key)
+            cleanKey := ReplaceUdollar(key.String())
+            newKey := cleanKey
             if prefix != "" {
-                newKey = prefix + "." + key
+                newKey = prefix + "." + cleanKey
             }
-            for k, val := range flattenSearchValues(value, newKey) {
-                flatSearch[k] = val
+
+            // Recursive call for nested maps
+            if val.Kind() == reflect.Map || val.Kind() == reflect.Slice {
+                for subKey, subVal := range flattenSearchValues(val.Interface(), newKey) {
+                    flatSearch[subKey] = subVal
+                }
+            } else {
+                flatSearch[newKey] = val.Interface()
             }
         }
 
-    case []interface{}: // Additional case for handling arrays
-        for i, item := range v {
+    case reflect.Slice:
+        for i := 0; i < reflectData.Len(); i++ {
             indexedPrefix := fmt.Sprintf("%s[%d]", prefix, i)
-            for k, val := range flattenSearchValues(item, indexedPrefix) {
-                flatSearch[k] = val
+            item := reflectData.Index(i).Interface()
+            // Recursive call for items in the slice if they are maps or slices themselves
+            if reflect.ValueOf(item).Kind() == reflect.Map || reflect.ValueOf(item).Kind() == reflect.Slice {
+                for subKey, subVal := range flattenSearchValues(item, indexedPrefix) {
+                    flatSearch[subKey] = subVal
+                }
+            } else {
+                flatSearch[indexedPrefix] = item
             }
         }
-
-    default: // Handle basic types by setting the value directly
-        flatSearch[prefix] = v
+    default:
+        // Basic types are directly assigned
+        flatSearch[prefix] = data
     }
 
     return flatSearch
