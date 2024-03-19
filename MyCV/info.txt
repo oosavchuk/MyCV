@@ -1,148 +1,182 @@
-package main
+package mapper
 
 import (
-    "context"
-    "encoding/json"
     "fmt"
-    "log"
-    "net/url"
-    "regexp"
-    "strings"
-    "time"
     "reflect"
+    "strings"
 
     "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/mongo"
-    "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// This function is intended to process any MongoDB query operators found,
-// including $elemMatch, and to flatten the structure appropriately.
-func processQueryOperators(data interface{}, parentKey string) bson.M {
-    flat := bson.M{}
+// flattenStruct is enhanced to recursively handle slices/arrays and maps of maps,
+// ensuring all nested structures are flattened into the parent bson.M.
+func flattenStruct(value reflect.Value, prefix string) bson.M {
+    result := bson.M{}
+    value = reflect.Indirect(value) // Dereference pointer if any
 
-    switch v := data.(type) {
-    case map[string]interface{}:
-        for key, value := range v {
-            fullKey := parentKey
-            if parentKey != "" {
-                fullKey += "."
-            }
-            fullKey += key
-
-            if key == "$elemMatch" {
-                // For $elemMatch, process the nested map and append its fields to the parent key
-                nestedFlat := processQueryOperators(value, "")
-                for nestedKey, nestedVal := range nestedFlat {
-                    compositeKey := parentKey + "." + nestedKey
-                    flat[compositeKey] = nestedVal
-                }
-            } else {
-                // Recursively process other keys
-                for nestedKey, nestedVal := range processQueryOperators(value, fullKey) {
-                    flat[nestedKey] = nestedVal
-                }
-            }
-        }
-
-    case []interface{}:
-        // Process each item in the slice
-        for i, item := range v {
-            indexedKey := parentKey + fmt.Sprintf("[%d]", i)
-            for nestedKey, nestedVal := range processQueryOperators(item, indexedKey) {
-                flat[nestedKey] = nestedVal
-            }
-        }
-
-    default:
-        // If not a map or slice, set the value directly
-        flat[parentKey] = true
+    if value.Kind() != reflect.Struct {
+        return result
     }
 
-    return flat
+    t := value.Type()
+    for i := 0; i < value.NumField(); i++ {
+        field := value.Field(i)
+        fieldT := t.Field(i)
+
+        // Skip unexported fields
+        if !field.CanInterface() {
+            continue
+        }
+
+        tagName, tagOpts := parseTag(fieldT.Tag.Get("bson"))
+        if tagName == "-" || tagName == "" {
+            tagName = strings.ToLower(fieldT.Name)
+        }
+
+        keyName := tagName
+        if prefix != "" {
+            keyName = prefix + "." + tagName
+        }
+
+        switch field.Kind() {
+        case reflect.Struct:
+            // Flatten nested struct directly into the parent map
+            nestedMap := flattenStruct(field, keyName)
+            mergeMaps(result, nestedMap)
+
+        case reflect.Slice, reflect.Array:
+            // Handle slices and arrays by iterating over elements
+            for j := 0; j < field.Len(); j++ {
+                element := field.Index(j)
+                indexedKeyName := fmt.Sprintf("%s[%d]", keyName, j)
+                if element.Kind() == reflect.Struct {
+                    // Flatten nested struct elements in the slice/array
+                    nestedMap := flattenStruct(element, indexedKeyName)
+                    mergeMaps(result, nestedMap)
+                } else if element.Kind() == reflect.Map {
+                    // Handle map elements in the slice/array
+                    nestedMap := flattenMap(element, indexedKeyName)
+                    mergeMaps(result, nestedMap)
+                } else {
+                    // Directly assign non-struct/map elements in the slice/array
+                    result[indexedKeyName] = element.Interface()
+                }
+            }
+
+        case reflect.Map:
+            // Flatten maps of maps by iterating over key-value pairs
+            nestedMap := flattenMap(field, keyName)
+            mergeMaps(result, nestedMap)
+
+        default:
+            result[keyName] = field.Interface()
+        }
+    }
+
+    return result
 }
 
-// flattenSearchValues takes an interface{} and a prefix string, returning a bson.M.
-// It recursively flattens nested maps and arrays into a flat bson.M structure with dot-notated keys.
-func flattenSearchValues(data interface{}, prefix string) bson.M {
-    flatSearch := bson.M{}
-
-    reflectData := reflect.ValueOf(data)
-    switch reflectData.Kind() {
-    case reflect.Map:
-        for _, key := range reflectData.MapKeys() {
-            val := reflectData.MapIndex(key)
-            cleanKey := ReplaceUdollar(key.String())
-            newKey := cleanKey
-            if prefix != "" {
-                newKey = prefix + "." + cleanKey
-            }
-
-            // Recursive call for nested maps
-            if val.Kind() == reflect.Map || val.Kind() == reflect.Slice {
-                for subKey, subVal := range flattenSearchValues(val.Interface(), newKey) {
-                    flatSearch[subKey] = subVal
-                }
-            } else {
-                flatSearch[newKey] = val.Interface()
-            }
-        }
-
-    case reflect.Slice:
-        for i := 0; i < reflectData.Len(); i++ {
-            indexedPrefix := fmt.Sprintf("%s[%d]", prefix, i)
-            item := reflectData.Index(i).Interface()
-            // Recursive call for items in the slice if they are maps or slices themselves
-            if reflect.ValueOf(item).Kind() == reflect.Map || reflect.ValueOf(item).Kind() == reflect.Slice {
-                for subKey, subVal := range flattenSearchValues(item, indexedPrefix) {
-                    flatSearch[subKey] = subVal
-                }
-            } else {
-                flatSearch[indexedPrefix] = item
-            }
-        }
-    default:
-        // Basic types are directly assigned
-        flatSearch[prefix] = data
-    }
-
-    return flatSearch
+// parseTag parses the bson struct tag to extract the key name and options.
+func parseTag(tag string) (string, string) {
+    // Example implementation to parse tag and options (like omitempty, flatten)
+    // This is placeholder logic and needs to be implemented according to requirements.
+    return tag, ""
 }
 
-func parseQueryData(query string) (bson.M, error) {
-    parsedURL, err := url.Parse(query)
-    if err != nil {
-        return nil, err
+// mergeMaps merges all key-value pairs from src into dst.
+func mergeMaps(dst, src bson.M) {
+    for k, v := range src {
+        dst[k] = v
     }
-
-    queryParams := parsedURL.Query()
-
-    // Initialize an empty BSON map to hold combined search and param data
-    combinedData := bson.M{}
-
-    // Extract and unmarshal the "search" data
-    if searchStr := queryParams.Get("search"); searchStr != "" {
-        var searchData bson.M
-        if err := json.Unmarshal([]byte(searchStr), &searchData); err != nil {
-            return nil, fmt.Errorf("error parsing search data: %w", err)
-        }
-        for k, v := range searchData {
-            combinedData[k] = v
-        }
-    }
-
-    // Extract and unmarshal the "param" data
-    if paramStr := queryParams.Get("param"); paramStr != "" {
-        var paramData bson.M
-        if err := json.Unmarshal([]byte(paramStr), &paramData); err != nil {
-            return nil, fmt.Errorf("error parsing param data: %w", err)
-        }
-        for k, v := range paramData {
-            combinedData[k] = v
-        }
-    }
-
-    return combinedData, nil
 }
+
+// flattenMap handles recursive flattening for map elements.
+func flattenMap(value reflect.Value, prefix string) bson.M {
+    result := bson.M{}
+    // Iterate over map and apply flattening logic.
+    // This should follow a similar approach to handling structs and slices/arrays,
+    // adjusted for map-specific iteration.
+    // Placeholder logic - needs implementation based on specific needs.
+    return result
+}
+
+// Adding ObjectID
+
+package mapper
+
+import (
+    "fmt"
+    "reflect"
+    "strings"
+
+    "go.mongodb.org/mongo-driver/bson"
+    "go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+// Assuming the previous context and definitions are provided, including parseTag, mergeMaps, and flattenMap.
+
+// flattenStruct is enhanced to handle primitive.ObjectID fields directly.
+func flattenStruct(value reflect.Value, prefix string) bson.M {
+    result := bson.M{}
+    value = reflect.Indirect(value) // Dereference pointer if any
+
+    if value.Kind() != reflect.Struct {
+        return result
+    }
+
+    t := value.Type()
+    for i := 0; i < value.NumField(); i++ {
+        field := value.Field(i)
+        fieldT := t.Field(i)
+
+        // Skip unexported fields
+        if !field.CanInterface() {
+            continue
+        }
+
+        tagName, _ := parseTag(fieldT.Tag.Get("bson"))
+        if tagName == "-" || tagName == "" {
+            tagName = strings.ToLower(fieldT.Name)
+        }
+
+        keyName := tagName
+        if prefix != "" {
+            keyName = prefix + "." + tagName
+        }
+
+        switch field.Interface().(type) {
+        case primitive.ObjectID:
+            // Handle primitive.ObjectID fields directly
+            result[keyName] = field.Interface()
+            
+        case struct{}, map[string]interface{}:
+            // Flatten nested struct or maps directly into the parent map
+            nestedMap := flattenStruct(field, keyName)
+            mergeMaps(result, nestedMap)
+
+        case []interface{}, []struct{}:
+            // Handle slices and arrays by iterating over elements
+            for j := 0; j < field.Len(); j++ {
+                element := field.Index(j)
+                indexedKeyName := fmt.Sprintf("%s[%d]", keyName, j)
+                if element.Kind() == reflect.Struct || element.Kind() == reflect.Map {
+                    // Flatten nested struct elements in the slice/array
+                    nestedMap := flattenStruct(element, indexedKeyName)
+                    mergeMaps(result, nestedMap)
+                } else {
+                    // Directly assign non-struct/map elements in the slice/array
+                    result[indexedKeyName] = element.Interface()
+                }
+            }
+
+        default:
+            result[keyName] = field.Interface()
+        }
+    }
+
+    return result
+}
+
+
 
 
