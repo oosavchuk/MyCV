@@ -1,182 +1,54 @@
-package mapper
+package main
 
 import (
-    "fmt"
-    "reflect"
-    "strings"
+    "context"
+    "log"
+    "time"
 
-    "go.mongodb.org/mongo-driver/bson"
+    "go.mongodb.org/mongo-driver/mongo"
+    "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// flattenStruct is enhanced to recursively handle slices/arrays and maps of maps,
-// ensuring all nested structures are flattened into the parent bson.M.
-func flattenStruct(value reflect.Value, prefix string) bson.M {
-    result := bson.M{}
-    value = reflect.Indirect(value) // Dereference pointer if any
+func connectToMongoDB(uri string) *mongo.Client {
+    // Set client options
+    clientOptions := options.Client().ApplyURI(uri)
 
-    if value.Kind() != reflect.Struct {
-        return result
+    // Connect to MongoDB
+    client, err := mongo.Connect(context.TODO(), clientOptions)
+    if err != nil {
+        log.Fatalf("Failed to connect to database: %v", err)
     }
 
-    t := value.Type()
-    for i := 0; i < value.NumField(); i++ {
-        field := value.Field(i)
-        fieldT := t.Field(i)
-
-        // Skip unexported fields
-        if !field.CanInterface() {
-            continue
-        }
-
-        tagName, tagOpts := parseTag(fieldT.Tag.Get("bson"))
-        if tagName == "-" || tagName == "" {
-            tagName = strings.ToLower(fieldT.Name)
-        }
-
-        keyName := tagName
-        if prefix != "" {
-            keyName = prefix + "." + tagName
-        }
-
-        switch field.Kind() {
-        case reflect.Struct:
-            // Flatten nested struct directly into the parent map
-            nestedMap := flattenStruct(field, keyName)
-            mergeMaps(result, nestedMap)
-
-        case reflect.Slice, reflect.Array:
-            // Handle slices and arrays by iterating over elements
-            for j := 0; j < field.Len(); j++ {
-                element := field.Index(j)
-                indexedKeyName := fmt.Sprintf("%s[%d]", keyName, j)
-                if element.Kind() == reflect.Struct {
-                    // Flatten nested struct elements in the slice/array
-                    nestedMap := flattenStruct(element, indexedKeyName)
-                    mergeMaps(result, nestedMap)
-                } else if element.Kind() == reflect.Map {
-                    // Handle map elements in the slice/array
-                    nestedMap := flattenMap(element, indexedKeyName)
-                    mergeMaps(result, nestedMap)
-                } else {
-                    // Directly assign non-struct/map elements in the slice/array
-                    result[indexedKeyName] = element.Interface()
-                }
-            }
-
-        case reflect.Map:
-            // Flatten maps of maps by iterating over key-value pairs
-            nestedMap := flattenMap(field, keyName)
-            mergeMaps(result, nestedMap)
-
-        default:
-            result[keyName] = field.Interface()
-        }
+    // Check the connection
+    err = client.Ping(context.TODO(), nil)
+    if err != nil {
+        log.Fatalf("Failed to ping database: %v", err)
     }
 
-    return result
-}
-
-// parseTag parses the bson struct tag to extract the key name and options.
-func parseTag(tag string) (string, string) {
-    // Example implementation to parse tag and options (like omitempty, flatten)
-    // This is placeholder logic and needs to be implemented according to requirements.
-    return tag, ""
-}
-
-// mergeMaps merges all key-value pairs from src into dst.
-func mergeMaps(dst, src bson.M) {
-    for k, v := range src {
-        dst[k] = v
-    }
-}
-
-// flattenMap handles recursive flattening for map elements.
-func flattenMap(value reflect.Value, prefix string) bson.M {
-    result := bson.M{}
-    // Iterate over map and apply flattening logic.
-    // This should follow a similar approach to handling structs and slices/arrays,
-    // adjusted for map-specific iteration.
-    // Placeholder logic - needs implementation based on specific needs.
-    return result
-}
-
-// Adding ObjectID
-
-package mapper
-
-import (
-    "fmt"
-    "reflect"
-    "strings"
-
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/bson/primitive"
-)
-
-// Assuming the previous context and definitions are provided, including parseTag, mergeMaps, and flattenMap.
-
-// flattenStruct is enhanced to handle primitive.ObjectID fields directly.
-func flattenStruct(value reflect.Value, prefix string) bson.M {
-    result := bson.M{}
-    value = reflect.Indirect(value) // Dereference pointer if any
-
-    if value.Kind() != reflect.Struct {
-        return result
-    }
-
-    t := value.Type()
-    for i := 0; i < value.NumField(); i++ {
-        field := value.Field(i)
-        fieldT := t.Field(i)
-
-        // Skip unexported fields
-        if !field.CanInterface() {
-            continue
-        }
-
-        tagName, _ := parseTag(fieldT.Tag.Get("bson"))
-        if tagName == "-" || tagName == "" {
-            tagName = strings.ToLower(fieldT.Name)
-        }
-
-        keyName := tagName
-        if prefix != "" {
-            keyName = prefix + "." + tagName
-        }
-
-        switch field.Interface().(type) {
-        case primitive.ObjectID:
-            // Handle primitive.ObjectID fields directly
-            result[keyName] = field.Interface()
-            
-        case struct{}, map[string]interface{}:
-            // Flatten nested struct or maps directly into the parent map
-            nestedMap := flattenStruct(field, keyName)
-            mergeMaps(result, nestedMap)
-
-        case []interface{}, []struct{}:
-            // Handle slices and arrays by iterating over elements
-            for j := 0; j < field.Len(); j++ {
-                element := field.Index(j)
-                indexedKeyName := fmt.Sprintf("%s[%d]", keyName, j)
-                if element.Kind() == reflect.Struct || element.Kind() == reflect.Map {
-                    // Flatten nested struct elements in the slice/array
-                    nestedMap := flattenStruct(element, indexedKeyName)
-                    mergeMaps(result, nestedMap)
-                } else {
-                    // Directly assign non-struct/map elements in the slice/array
-                    result[indexedKeyName] = element.Interface()
-                }
-            }
-
-        default:
-            result[keyName] = field.Interface()
-        }
-    }
-
-    return result
+    log.Println("Connected to MongoDB!")
+    return client
 }
 
 
+func main() {
+    uri1 := "mongodb://<username>:<password>@<host1>/<db1>?authSource=admin&authMechanism=SCRAM-SHA-256"
+    uri2 := "mongodb://<username>:<password>@<host2>/<db2>?authSource=admin&authMechanism=SCRAM-SHA-256"
 
+    // Connect to the first MongoDB database
+    client1 := connectToMongoDB(uri1)
+    defer func() {
+        if err := client1.Disconnect(context.Background()); err != nil {
+            panic(err)
+        }
+    }()
 
+    // Connect to the second MongoDB database
+    client2 := connectToMongoDB(uri2)
+    defer func() {
+        if err := client2.Disconnect(context.Background()); err != nil {
+            panic(err)
+        }
+    }()
+
+    // Now, client1 and client2 can be used to interact with their respective databases
+}
