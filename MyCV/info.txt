@@ -1,91 +1,13 @@
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/mongo"
-    "go.mongodb.org/mongo-driver/mongo/options"
-)
-
-// deleteDataInBatches deletes documents matching the filter in batches.
-func deleteDataInBatches(collection *mongo.Collection, filter bson.D, batchSize int64) error {
-    ctx := context.TODO()
-
-    // Find documents matching the filter
-    findOptions := options.Find()
-    findOptions.SetProjection(bson.M{"_id": 1}) // Only retrieve the _id field
-    cursor, err := collection.Find(ctx, filter, findOptions)
-    if err != nil {
-        return fmt.Errorf("finding documents failed: %v", err)
-    }
-    defer cursor.Close(ctx)
-
-    var idsToDelete []interface{} // Collect IDs of documents to delete
-    count := int64(0)
-
-    for cursor.Next(ctx) {
-        var doc bson.M
-        if err := cursor.Decode(&doc); err != nil {
-            return fmt.Errorf("decoding document failed: %v", err)
-        }
-
-        idsToDelete = append(idsToDelete, doc["_id"])
-        count++
-
-        // Perform the batch delete when reaching batchSize
-        if count%batchSize == 0 {
-            if err := batchDelete(collection, idsToDelete); err != nil {
-                return err
-            }
-            idsToDelete = idsToDelete[:0] // Reset slice for next batch
-        }
-    }
-
-    // Delete any remaining documents
-    if len(idsToDelete) > 0 {
-        if err := batchDelete(collection, idsToDelete); err != nil {
-            return err
-        }
-    }
-
-    if err := cursor.Err(); err != nil {
-        return fmt.Errorf("cursor error: %v", err)
-    }
-
-    log.Printf("Successfully deleted documents in batches")
-    return nil
-}
-
-// batchDelete performs a batch delete operation for documents with the specified IDs.
-func batchDelete(collection *mongo.Collection, ids []interface{}) error {
-    ctx := context.TODO()
-    deleteFilter := bson.M{"_id": bson.M{"$in": ids}}
-    result, err := collection.DeleteMany(ctx, deleteFilter)
-    if err != nil {
-        return fmt.Errorf("batch delete failed: %v", err)
-    }
-
-    log.Printf("Deleted %d documents", result.DeletedCount)
-    return nil
-}
+filter.yaml
+filter: "org.apache.storm.security.auth.basic.BasicHttpAuthenticationFilter"
+params:
+  username: "admin"
+  password: "admin"
 
 
-func main() {
-    // Assume client is your MongoDB client
-    collection := client.Database("yourDatabase").Collection("yourCollection")
+storm.yaml
+ui.filter: "org.apache.storm.ui.filters.Filters"
+ui.filter.params:
+  "filter.config.file": "filter.yaml"
 
-    // Define the filter for documents to be deleted, adjust as necessary
-    filter := bson.D{{"fieldToMatch", "valueToMatch"}}
-
-    // Specify the batch size
-    batchSize := int64(100)
-
-    // Call the deleteDataInBatches function
-    if err := deleteDataInBatches(collection, filter, batchSize); err != nil {
-        log.Fatalf("Batch delete failed: %v", err)
-    }
-}
 
