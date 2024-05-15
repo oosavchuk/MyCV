@@ -1,13 +1,22 @@
-filter.yaml
-filter: "org.apache.storm.security.auth.basic.BasicHttpAuthenticationFilter"
-params:
-  username: "admin"
-  password: "admin"
+#!/bin/bash
 
+# Set environment variables
+export STORM_AUTH_SIMPLE_USERNAME="admin"
+export STORM_AUTH_SIMPLE_PASSWORD="password"
 
-storm.yaml
-ui.filter: "org.apache.storm.ui.filters.Filters"
+# Set Java options to pass environment variables as system properties
+export STORM_JAVA_OPTS="-Dstorm.auth.simple.username=$STORM_AUTH_SIMPLE_USERNAME -Dstorm.auth.simple.password=$STORM_AUTH_SIMPLE_PASSWORD"
+
+# Start Storm UI (modify paths as necessary)
+storm nimbus &
+storm ui &
+storm supervisor &
+
+ui.filter: "org.apache.hadoop.security.authentication.server.AuthenticationFilter"
 ui.filter.params:
-  "filter.config.file": "filter.yaml"
-
+  "type": "simple"
+  "config.prefix": "storm.auth"
+  "storm.auth.simple.anonymous.allowed": "false"
+  "storm.auth.simple.username": "${storm.auth.simple.username}"
+  "storm.auth.simple.password": "${storm.auth.simple.password}"
 
