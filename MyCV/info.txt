@@ -24,11 +24,19 @@ Setting up NGINX as a reverse proxy to forward requests to the Storm UI and requ
 
 sudo nano /etc/nginx/conf.d/storm.conf
 
+htpasswd -c /etc/nginx/.htpasswd admin
+
 server {
     listen 80;
     server_name your-server-name;
 
     location / {
+        # Restrict access to localhost only
+        allow 127.0.0.1;
+        deny all;
+        # Enable Basic Authentication
+        auth_basic "Restricted Access";
+        auth_basic_user_file /etc/nginx/.htpasswd;
         # Check if user.name is present in the query string
         if ($arg_user_name = "") {
             return 403;
@@ -43,6 +51,11 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Additional proxy settings
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        chunked_transfer_encoding off;
     }
 }
 
@@ -54,5 +67,50 @@ sudo systemctl reload nginx
 http://your-server-name/?user_name=admin
 
 By following these steps, you have configured NGINX to act as a reverse proxy for the Storm UI and enforce the presence of the user.name query parameter. This setup ensures that any request without the user.name parameter is rejected, enhancing security by requiring this parameter for access.
+
+
+# Ensure your firewall is configured to block access to port 8888 from external machines.
+sudo iptables -A INPUT -p tcp --dport 8888 -j DROP
+sudo iptables -A INPUT -p tcp -s 127.0.0.1 --dport 8888 -j ACCEPT
+-----------------------------------------------
+ui.port: 8744 # Default UI port, change as necessary
+
+ui.https.enabled: true
+ui.https.keystore.path: "path/to/keystore.jks"
+ui.https.keystore.password: "keystorepassword"
+ui.https.keystore.type: "JKS"
+ui.https.key.password: "keypassword"
+
+# Enable client authentication
+ui.https.need.client.auth: true
+ui.https.truststore.path: "path/to/truststore.jks"
+ui.https.truststore.password: "truststorepassword"
+ui.https.truststore.type: "JKS"
+
+
+# Creating an Index with Mappings
+curl -X PUT "localhost:9200/my_index" -H 'Content-Type: application/json' -d'
+{
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text"
+      },
+      "age": {
+        "type": "integer"
+      },
+      "email": {
+        "type": "keyword"
+      }
+    }
+  }
+}'
+
+# Verifying Mappings
+curl -X GET "localhost:9200/my_index/_mapping" -H 'Content-Type: application/json'
+
+
+
+
 
 
