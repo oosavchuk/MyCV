@@ -1,16 +1,15 @@
 #!/bin/bash
 
 # Set environment variables
-export STORM_AUTH_SIMPLE_USERNAME="admin"
-export STORM_AUTH_SIMPLE_PASSWORD="password"
+export STORM_AUTH_SIMPLE_USERNAME="admin" export
+STORM_AUTH_SIMPLE_PASSWORD="password"
 
 # Set Java options to pass environment variables as system properties
-export STORM_JAVA_OPTS="-Dstorm.auth.simple.username=$STORM_AUTH_SIMPLE_USERNAME -Dstorm.auth.simple.password=$STORM_AUTH_SIMPLE_PASSWORD"
+export
+STORM_JAVA_OPTS="-Dstorm.auth.simple.username=$STORM_AUTH_SIMPLE_USERNAME -Dstorm.auth.simple.password=$STORM_AUTH_SIMPLE_PASSWORD"
 
 # Start Storm UI (modify paths as necessary)
-storm nimbus &
-storm ui &
-storm supervisor &
+storm nimbus & storm ui & storm supervisor &
 
 ui.filter: "org.apache.hadoop.security.authentication.server.AuthenticationFilter"
 ui.filter.params:
@@ -20,65 +19,57 @@ ui.filter.params:
   "storm.auth.simple.username": "${storm.auth.simple.username}"
   "storm.auth.simple.password": "${storm.auth.simple.password}"
 
-Setting up NGINX as a reverse proxy to forward requests to the Storm UI and require a user.name parameter can be done by configuring NGINX to handle authentication and then pass the requests to the Storm UI.
+Setting up NGINX as a reverse proxy to forward requests to the Storm UI and
+require a user.name parameter can be done by configuring NGINX to handle
+authentication and then pass the requests to the Storm UI.
 
 sudo nano /etc/nginx/conf.d/storm.conf
 
 htpasswd -c /etc/nginx/.htpasswd admin
 
-server {
-    listen 80;
-    server_name your-server-name;
+server { listen 80; server_name your-server-name;
 
     location / {
-        # Restrict access to localhost only
-        allow 127.0.0.1;
-        deny all;
-        # Enable Basic Authentication
-        auth_basic "Restricted Access";
-        auth_basic_user_file /etc/nginx/.htpasswd;
-        # Check if user.name is present in the query string
-        if ($arg_user_name = "") {
-            return 403;
-        }
+        # Restrict access to localhost only allow 127.0.0.1; deny all;
+        # Enable Basic Authentication auth_basic "Restricted Access";
+          auth_basic_user_file /etc/nginx/.htpasswd;
+        # Check if user.name is present in the query string if
+          ($arg_user_name = "") { return 403; }
 
-        # Pass the user.name parameter to the backend server
-        proxy_set_header user.name $arg_user_name;
+        # Pass the user.name parameter to the backend server proxy_set_header
+          user.name $arg_user_name;
 
-        # Proxy settings to forward requests to Storm UI
-        proxy_pass http://localhost:8080;  # Change the port if your Storm UI runs on a different port
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        # Proxy settings to forward requests to Storm UI proxy_pass
+          http://localhost:8080;  # Change the port if your Storm UI runs on a
+          different port proxy_set_header Host $host; proxy_set_header
+          X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For
+          $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto
+          $scheme;
 
-        # Additional proxy settings
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        chunked_transfer_encoding off;
-    }
-}
+        # Additional proxy settings proxy_http_version 1.1; proxy_set_header
+          Connection ""; chunked_transfer_encoding off; } }
 
-Test the NGINX configuration for syntax errors:
-sudo nginx -t
+Test the NGINX configuration for syntax errors: sudo nginx -t
 
 sudo systemctl reload nginx
 
 http://your-server-name/?user_name=admin
 
-By following these steps, you have configured NGINX to act as a reverse proxy for the Storm UI and enforce the presence of the user.name query parameter. This setup ensures that any request without the user.name parameter is rejected, enhancing security by requiring this parameter for access.
+By following these steps, you have configured NGINX to act as a reverse proxy
+for the Storm UI and enforce the presence of the user.name query parameter.
+This setup ensures that any request without the user.name parameter is
+rejected, enhancing security by requiring this parameter for access.
 
 
-# Ensure your firewall is configured to block access to port 8888 from external machines.
-sudo iptables -A INPUT -p tcp --dport 8888 -j DROP
-sudo iptables -A INPUT -p tcp -s 127.0.0.1 --dport 8888 -j ACCEPT
+# Ensure your firewall is configured to block access to port 8888 from external
+# machines.
+sudo iptables -A INPUT -p tcp --dport 8888 -j DROP sudo iptables -A INPUT -p
+tcp -s 127.0.0.1 --dport 8888 -j ACCEPT
 -----------------------------------------------
 ui.port: 8744 # Default UI port, change as necessary
 
-ui.https.enabled: true
-ui.https.keystore.path: "path/to/keystore.jks"
-ui.https.keystore.password: "keystorepassword"
-ui.https.keystore.type: "JKS"
+ui.https.enabled: true ui.https.keystore.path: "path/to/keystore.jks"
+ui.https.keystore.password: "keystorepassword" ui.https.keystore.type: "JKS"
 ui.https.key.password: "keypassword"
 
 # Enable client authentication
@@ -89,25 +80,106 @@ ui.https.truststore.type: "JKS"
 
 
 # Creating an Index with Mappings
-curl -X PUT "localhost:9200/my_index" -H 'Content-Type: application/json' -d'
-{
+curl -X PUT "localhost:9200/my_index" -H 'Content-Type: application/json' -d'{
   "mappings": {
     "properties": {
       "name": {
-        "type": "text"
-      },
+        "type": "text" },
       "age": {
-        "type": "integer"
-      },
+        "type": "integer" },
       "email": {
-        "type": "keyword"
-      }
-    }
-  }
-}'
+        "type": "keyword" } } } }'
 
 # Verifying Mappings
-curl -X GET "localhost:9200/my_index/_mapping" -H 'Content-Type: application/json'
+curl -X GET "localhost:9200/my_index/_mapping" -H 'Content-Type:
+application/json'
+
+
+# polkit
+Let’s create a Polkit rule that grants permissions to manage example.service,
+another.service, and yetanother.service for a user named username. We will
+write this rule in JavaScript, which is the language used for Polkit rules
+since version 0.106.
+
+sudo nano /etc/polkit-1/rules.d/50-systemctl-multi-manage.rules
+
+polkit.addRule(function(action, subject) {
+    var services = ["example.service", "another.service", "yetanother.service"];  // List of services the user can manage
+    if (action.id.indexOf("org.freedesktop.systemd1.manage-unit-files") >= 0 ||
+        action.id.indexOf("org.freedesktop.systemd1.manage-units") >= 0) {
+        if (services.indexOf(action.lookup("unit")) >= 0 && subject.user == "username") {
+            return polkit.Result.YES;
+        }
+    }
+});
+
+# several users
+polkit.addRule(function(action, subject) {
+    var allowedServices = ["example.service", "another.service", "yetanother.service"];  // List of services
+    var allowedUsers = ["username1", "username2", "username3"];  // List of users
+
+    if ((action.id.indexOf("org.freedesktop.systemd1.manage-unit-files") >= 0 ||
+        action.id.indexOf("org.freedesktop.systemd1.manage-units") >= 0) &&
+        allowedServices.indexOf(action.lookup("unit")) >= 0 &&
+        allowedUsers.indexOf(subject.user) >= 0) {
+        return polkit.Result.YES;
+    }
+});
+
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
+
+
+# test
+sudo systemctl restart example.service
+
+/etc/sudoers
+username ALL=NOPASSWD: /bin/systemctl start example.service, /bin/systemctl stop example.service, /bin/systemctl restart example.service
+
+username ALL=(ALL) NOPASSWD: /bin/systemctl start *, /bin/systemctl stop *, /bin/systemctl restart *, /bin/systemctl status *
+
+---------------------
+const dbName = "yourDb";
+const collName = "yourCollection";
+const sourceShard = "shard01";
+const targetShard = "shard02";
+const dryRun = true; // 🔄 Set to false to actually move chunks
+
+const configDB = db.getSiblingDB("config");
+
+// Step 1: Get the collection UUID
+const collEntry = configDB.collections.findOne({ _id: `${dbName}.${collName}` });
+if (!collEntry) {
+  throw new Error(`Collection ${dbName}.${collName} not found in config.collections`);
+}
+
+const uuid = collEntry.uuid;
+print(`✅ Collection UUID: ${uuid}`);
+
+// Step 2: Get chunks for the UUID and source shard
+const chunks = configDB.chunks.find({ uuid: uuid, shard: sourceShard }).toArray();
+print(`📦 Found ${chunks.length} chunks on ${sourceShard}`);
+
+// Step 3: Iterate and move chunks (or just show what would be moved)
+chunks.forEach(chunk => {
+  const key = chunk.min;
+  if (dryRun) {
+    print(`🧪 [Dry Run] Would move chunk: min=${tojson(key)} from ${sourceShard} to ${targetShard}`);
+  } else {
+    print(`🚚 Moving chunk: min=${tojson(key)} to ${targetShard}`);
+    const result = sh.moveChunk(`${dbName}.${collName}`, key, targetShard);
+    if (result.ok) {
+      print(`✅ Moved chunk: ${tojson(key)}`);
+    } else {
+      print(`❌ Failed to move chunk: ${tojson(result)}`);
+    }
+  }
+});
 
 
 
