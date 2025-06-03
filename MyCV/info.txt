@@ -181,8 +181,108 @@ chunks.forEach(chunk => {
   }
 });
 
+sh.addShardToZone("shard02", "zoneA")
+sh.addShardToZone("shard03", "zoneA")
+
+sh.updateZoneKeyRange(
+  "mydb.mycoll",
+  { _id: MinKey },
+  { _id: MaxKey },
+  "zoneA"
+)
+
+// move chunks or let balancer do it:
+sh.startBalancer()
 
 
+
+// check chunk distribution
+db.getSiblingDB("config").chunks.aggregate([
+  { $group: { _id: "$shard", count: { $sum: 1 } } }
+]);
+
+// check assigned zones
+sh.status()
+
+// mongosh --port 27018 init-shard-and-add.js
+
+// === CONFIGURATION ===
+const replSetName = "rsNewShard";
+const shardMembers = [
+  { _id: 0, host: "host1:27018" },
+  { _id: 1, host: "host2:27019" },
+  { _id: 2, host: "host3:27020" }
+];
+
+const adminUser = {
+  user: "admin",
+  pwd: "YourStrongPassword",
+  roles: [ { role: "root", db: "admin" } ]
+};
+
+const mongosHost = "mongos-host:27017"; // Replace with actual mongos
+const mongosUser = adminUser.user;
+const mongosPwd = adminUser.pwd;
+
+// === INITIATE REPLICA SET ===
+print("📌 Initiating replica set...");
+const rsConfig = { _id: replSetName, members: shardMembers };
+try {
+  const rsResult = rs.initiate(rsConfig);
+  print("✅ Replica set initiated:", tojson(rsResult));
+} catch (e) {
+  print("⚠️ rs.initiate may already be done:", e.message);
+}
+
+// Wait for primary
+let primaryReady = false;
+for (let i = 0; i < 20; i++) {
+  try {
+    if (rs.status().myState === 1) {
+      primaryReady = true;
+      break;
+    }
+  } catch (e) {}
+  sleep(1000);
+}
+if (!primaryReady) {
+  print("❌ Primary not ready. Exiting.");
+  quit(1);
+}
+
+// === CREATE ADMIN USER ===
+print("🔐 Creating admin user...");
+try {
+  db.getSiblingDB("admin").createUser(adminUser);
+  print("✅ Admin user created.");
+} catch (e) {
+  print("⚠️ User may already exist:", e.message);
+}
+
+// === ADD SHARD TO CLUSTER ===
+print(`🔗 Connecting to mongos @ ${mongosHost}...`);
+const mongos = new Mongo(mongosHost);
+const mongosAdmin = mongos.getDB("admin");
+
+try {
+  mongosAdmin.auth(mongosUser, mongosPwd);
+  const addShardResult = mongosAdmin.runCommand({
+    addShard: `${replSetName}/${shardMembers.map(m => m.host).join(",")}`
+  });
+  print("✅ Shard added:", tojson(addShardResult));
+} catch (e) {
+  print("❌ Failed to add shard:", e.message);
+  quit(1);
+}
+
+/*
+----------------------------------
+Add this shard to mongos
+mongosh --host mongos-host:27017 -u admin -p yourStrongPassword --authenticationDatabase admin
+
+sh.addShard("rsNewShard/host1:27018,host2:27019,host3:27020")
+ 
+*/
 
 
 
