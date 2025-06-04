@@ -204,91 +204,61 @@ db.getSiblingDB("config").chunks.aggregate([
 // check assigned zones
 sh.status()
 
-# Define replica set name
-REPLSET_NAME="rsNewShard"
+const replSetName = "rsNewShard";
+const shardMembers = [
+  { host: "host1:27017" },
+  { host: "host2:27017" },
+  { host: "host3:27017" }
+];
 
-# Define hosts and ports (ensure same index for each)
-HOSTS=("host1" "host2" "host3")
-PORTS=(27018 27019 27020)
+const mongosUser = "admin";
+const mongosPwd = "password";
+const primaryHost = shardMembers[0].host;
 
-# Export these as comma-separated strings for the JS script
-HOSTS_CSV=$(IFS=, ; echo "${HOSTS[*]}")
-PORTS_CSV=$(IFS=, ; echo "${PORTS[*]}")
+// Step 1: Connect to mongos
+const mongosAdmin = new Mongo().getDB("admin");
+mongosAdmin.auth(mongosUser, mongosPwd);
 
-# Define admin credentials for mongos
-MONGOS_HOST="mongos-host:27017"
-ADMIN_USER="admin"
-ADMIN_PWD="YourStrongPassword"
-
-# Call mongosh with variables
-mongosh --eval "
-  const replSetName = '$REPLSET_NAME';
-  const hosts = '$HOSTS_CSV'.split(',');
-  const ports = '$PORTS_CSV'.split(',');
-  const mongosHost = '$MONGOS_HOST';
-  const mongosUser = '$ADMIN_USER';
-  const mongosPwd = '$ADMIN_PWD';
-" init-shard.js
-
-*/
-
-// Construct shard members
-const shardMembers = hosts.map((host, i) => ({
-  _id: i,
-  host: `${host}:${ports[i]}`
-}));
-
-const adminUser = {
-  user: mongosUser,
-  pwd: mongosPwd,
-  roles: [{ role: "root", db: "admin" }]
-};
-
-// INITIATE REPLICA SET
-print("📌 Initiating replica set...");
+let addShardResult;
 try {
-  const rsResult = rs.initiate({ _id: replSetName, members: shardMembers });
-  print("✅ Replica set initiated:", tojson(rsResult));
-} catch (e) {
-  print("⚠️ rs.initiate failed or already exists:", e.message);
-}
-
-// Wait for PRIMARY
-let ready = false;
-for (let i = 0; i < 20; i++) {
-  try {
-    if (rs.status().myState === 1) {
-      ready = true;
-      break;
-    }
-  } catch (e) {}
-  sleep(1000);
-}
-if (!ready) {
-  print("❌ Primary not ready");
-  quit(1);
-}
-
-// CREATE ADMIN USER
-try {
-  db.getSiblingDB("admin").createUser(adminUser);
-  print("✅ Admin user created.");
-} catch (e) {
-  print("⚠️ User may exist:", e.message);
-}
-
-// ADD SHARD
-const mongos = new Mongo(mongosHost);
-const mongosAdmin = mongos.getDB("admin");
-try {
-  mongosAdmin.auth(mongosUser, mongosPwd);
-  const addShardRes = mongosAdmin.runCommand({
-    addShard: `${replSetName}/${shardMembers.map(m => m.host).join(',')}`
+  addShardResult = mongosAdmin.runCommand({
+    addShard: `${replSetName}/${shardMembers.map(m => m.host).join(",")}`
   });
-  print("✅ Shard added:", tojson(addShardRes));
+
+  if (addShardResult.ok) {
+    print("Shard added successfully.");
+    quit();
+  } else if (addShardResult.codeName === "DuplicateKey" || /already exists/.test(addShardResult.errmsg)) {
+    print("Shard already exists, continuing to add missing members...");
+  } else {
+    throw new Error("Unhandled error during addShard: " + tojson(addShardResult));
+  }
 } catch (e) {
-  print("❌ Failed to add shard:", e.message);
-  quit(1);
+  print("Error during addShard:", e.message);
 }
+
+// Step 2: Connect to replica set primary and add missing members
+const rsConn = new Mongo(primaryHost);
+const rsAdmin = rsConn.getDB("admin");
+rsAdmin.auth(mongosUser, mongosPwd);
+
+const status = rsAdmin.runCommand({ replSetGetStatus: 1 });
+const existingHosts = status.members.map(m => m.name);
+
+// Add each missing member
+shardMembers.forEach(m => {
+  if (!existingHosts.includes(m.host)) {
+    print(`Adding member ${m.host} to replica set ${replSetName}`);
+    const addResult = rsAdmin.runCommand({ replSetAdd: { host: m.host } });
+
+    if (!addResult.ok) {
+      print(`Failed to add ${m.host}: ${tojson(addResult)}`);
+    } else {
+      print(`Successfully added ${m.host}`);
+    }
+  } else {
+    print(`${m.host} already exists in replica set`);
+  }
+});
 
 
