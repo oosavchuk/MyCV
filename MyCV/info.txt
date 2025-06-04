@@ -204,85 +204,91 @@ db.getSiblingDB("config").chunks.aggregate([
 // check assigned zones
 sh.status()
 
-// mongosh --port 27018 init-shard-and-add.js
+# Define replica set name
+REPLSET_NAME="rsNewShard"
 
-// === CONFIGURATION ===
-const replSetName = "rsNewShard";
-const shardMembers = [
-  { _id: 0, host: "host1:27018" },
-  { _id: 1, host: "host2:27019" },
-  { _id: 2, host: "host3:27020" }
-];
+# Define hosts and ports (ensure same index for each)
+HOSTS=("host1" "host2" "host3")
+PORTS=(27018 27019 27020)
+
+# Export these as comma-separated strings for the JS script
+HOSTS_CSV=$(IFS=, ; echo "${HOSTS[*]}")
+PORTS_CSV=$(IFS=, ; echo "${PORTS[*]}")
+
+# Define admin credentials for mongos
+MONGOS_HOST="mongos-host:27017"
+ADMIN_USER="admin"
+ADMIN_PWD="YourStrongPassword"
+
+# Call mongosh with variables
+mongosh --eval "
+  const replSetName = '$REPLSET_NAME';
+  const hosts = '$HOSTS_CSV'.split(',');
+  const ports = '$PORTS_CSV'.split(',');
+  const mongosHost = '$MONGOS_HOST';
+  const mongosUser = '$ADMIN_USER';
+  const mongosPwd = '$ADMIN_PWD';
+" init-shard.js
+
+*/
+
+// Construct shard members
+const shardMembers = hosts.map((host, i) => ({
+  _id: i,
+  host: `${host}:${ports[i]}`
+}));
 
 const adminUser = {
-  user: "admin",
-  pwd: "YourStrongPassword",
-  roles: [ { role: "root", db: "admin" } ]
+  user: mongosUser,
+  pwd: mongosPwd,
+  roles: [{ role: "root", db: "admin" }]
 };
 
-const mongosHost = "mongos-host:27017"; // Replace with actual mongos
-const mongosUser = adminUser.user;
-const mongosPwd = adminUser.pwd;
-
-// === INITIATE REPLICA SET ===
+// INITIATE REPLICA SET
 print("📌 Initiating replica set...");
-const rsConfig = { _id: replSetName, members: shardMembers };
 try {
-  const rsResult = rs.initiate(rsConfig);
+  const rsResult = rs.initiate({ _id: replSetName, members: shardMembers });
   print("✅ Replica set initiated:", tojson(rsResult));
 } catch (e) {
-  print("⚠️ rs.initiate may already be done:", e.message);
+  print("⚠️ rs.initiate failed or already exists:", e.message);
 }
 
-// Wait for primary
-let primaryReady = false;
+// Wait for PRIMARY
+let ready = false;
 for (let i = 0; i < 20; i++) {
   try {
     if (rs.status().myState === 1) {
-      primaryReady = true;
+      ready = true;
       break;
     }
   } catch (e) {}
   sleep(1000);
 }
-if (!primaryReady) {
-  print("❌ Primary not ready. Exiting.");
+if (!ready) {
+  print("❌ Primary not ready");
   quit(1);
 }
 
-// === CREATE ADMIN USER ===
-print("🔐 Creating admin user...");
+// CREATE ADMIN USER
 try {
   db.getSiblingDB("admin").createUser(adminUser);
   print("✅ Admin user created.");
 } catch (e) {
-  print("⚠️ User may already exist:", e.message);
+  print("⚠️ User may exist:", e.message);
 }
 
-// === ADD SHARD TO CLUSTER ===
-print(`🔗 Connecting to mongos @ ${mongosHost}...`);
+// ADD SHARD
 const mongos = new Mongo(mongosHost);
 const mongosAdmin = mongos.getDB("admin");
-
 try {
   mongosAdmin.auth(mongosUser, mongosPwd);
-  const addShardResult = mongosAdmin.runCommand({
-    addShard: `${replSetName}/${shardMembers.map(m => m.host).join(",")}`
+  const addShardRes = mongosAdmin.runCommand({
+    addShard: `${replSetName}/${shardMembers.map(m => m.host).join(',')}`
   });
-  print("✅ Shard added:", tojson(addShardResult));
+  print("✅ Shard added:", tojson(addShardRes));
 } catch (e) {
   print("❌ Failed to add shard:", e.message);
   quit(1);
 }
-
-/*
-----------------------------------
-Add this shard to mongos
-mongosh --host mongos-host:27017 -u admin -p yourStrongPassword --authenticationDatabase admin
-
-sh.addShard("rsNewShard/host1:27018,host2:27019,host3:27020")
- 
-*/
-
 
 
