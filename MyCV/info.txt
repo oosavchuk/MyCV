@@ -262,23 +262,46 @@ shardMembers.forEach(m => {
 });
 
 
+--------------------------
+
 #!/bin/bash
 
-# Get total VM used by all processes
-used_vm=$(ps -eo vsz --no-headers | awk '{sum+=$1} END {print sum/1024}')  # in MB
+# Thresholds
+MAX_SWAP_MB=20000      # Warn if swap used > 2000 MB
+MAX_COMMITTED_PERCENT=120   # Warn if Committed_AS > 120% of total RAM
+LOGFILE="/var/log/vm_monitor.log"
 
-# Get total system virtual memory: RAM + Swap
-total_vm=$(free -k | awk '/Mem:/ {ram=$2} /Swap:/ {swap=$2} END {print (ram + swap)/1024}')  # in MB
+# Get memory info
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+COMMITTED_AS_KB=$(grep Committed_AS /proc/meminfo | awk '{print $2}')
+SWAP_USED_MB=$(free -m | awk '/Swap:/ {print $3}')
+OVERCOMMIT=$(cat /proc/sys/vm/overcommit_memory)
 
-echo "Total VM used by processes: $used_vm MB"
-echo "Total system VM available : $total_vm MB"
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+ALERT=""
 
-usage_pct=$(awk -v used="$used_vm" -v total="$total_vm" 'BEGIN {printf "%.2f", (used/total)*100}')
-echo "Percentage used: $usage_pct%"
-# ---------------
+# Calculate committed % of total RAM
+COMMITTED_PERCENT=$(( 100 * COMMITTED_AS_KB / TOTAL_RAM_KB ))
 
-sudo awk '/^Name:/ {name=$2} /^Uid:/ {uid=$2} /^VmPeak:/ {printf "PID:%s UID:%s VmPeak:%s KB\n", FILENAME, uid, $2; total+=$2} END {print "Total VmPeak:", total, "KB"}' /proc/[0-9]*/status 2>/dev/null
+# Check swap usage
+if [ "$SWAP_USED_MB" -gt "$MAX_SWAP_MB" ]; then
+  ALERT+="[WARNING] High swap usage: ${SWAP_USED_MB} MB used\n"
+fi
 
+# Check overcommit
+if [ "$COMMITTED_PERCENT" -gt "$MAX_COMMITTED_PERCENT" ]; then
+  ALERT+="[WARNING] Committed_AS is ${COMMITTED_PERCENT}% of RAM\n"
+fi
 
+# Check for recent OOM events
+OOM_EVENTS=$(dmesg -T | grep -i 'out of memory' | tail -n 3)
+if [ -n "$OOM_EVENTS" ]; then
+  ALERT+="[WARNING] Recent OOM events detected:\n${OOM_EVENTS}\n"
+fi
 
-
+# Log or output
+if [ -n "$ALERT" ]; then
+  echo -e "\n$TIMESTAMP\n$ALERT" | tee -a "$LOGFILE"
+else
+  echo "$TIMESTAMP - Memory check OK" >> "$LOGFILE"
+fi
