@@ -262,3 +262,23 @@ shardMembers.forEach(m => {
 });
 
 
+#!/bin/bash
+
+# Get total VM used by all processes
+used_vm=$(ps -eo vsz --no-headers | awk '{sum+=$1} END {print sum/1024}')  # in MB
+
+# Get total system virtual memory: RAM + Swap
+total_vm=$(free -k | awk '/Mem:/ {ram=$2} /Swap:/ {swap=$2} END {print (ram + swap)/1024}')  # in MB
+
+echo "Total VM used by processes: $used_vm MB"
+echo "Total system VM available : $total_vm MB"
+
+usage_pct=$(awk -v used="$used_vm" -v total="$total_vm" 'BEGIN {printf "%.2f", (used/total)*100}')
+echo "Percentage used: $usage_pct%"
+# ---------------
+
+sudo awk '/^Name:/ {name=$2} /^Uid:/ {uid=$2} /^VmPeak:/ {printf "PID:%s UID:%s VmPeak:%s KB\n", FILENAME, uid, $2; total+=$2} END {print "Total VmPeak:", total, "KB"}' /proc/[0-9]*/status 2>/dev/null
+
+
+
+
