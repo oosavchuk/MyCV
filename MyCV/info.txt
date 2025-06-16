@@ -264,44 +264,25 @@ shardMembers.forEach(m => {
 
 --------------------------
 
-#!/bin/bash
+HttpClient leaving connections in CLOSE_WAIT state until Java process ends
+https://bugs.openjdk.org/browse/JDK-8221395?utm_source=chatgpt.com
 
-# Thresholds
-MAX_SWAP_MB=20000      # Warn if swap used > 2000 MB
-MAX_COMMITTED_PERCENT=120   # Warn if Committed_AS > 120% of total RAM
-LOGFILE="/var/log/vm_monitor.log"
+CLOSE_WAIT problem and high VM usage could very well stem from the Netty proxy design
+Mutual Close Loop / Infinite Recursion
+This pattern creates a feedback loop:
 
-# Get memory info
-TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-COMMITTED_AS_KB=$(grep Committed_AS /proc/meminfo | awk '{print $2}')
-SWAP_USED_MB=$(free -m | awk '/Swap:/ {print $3}')
-OVERCOMMIT=$(cat /proc/sys/vm/overcommit_memory)
+Frontend channel becomes inactive → triggers channelInactive() → closes backend channel.
+Backend channel closes → triggers its own channelInactive() → closes frontend channel again.
+Which may result in:
+Re-entering the same close logic.
+Sockets not fully torn down.
+Channel stuck in CLOSE_WAIT if underlying socket isn't properly closed.
+Thread stack pressure or increased memory/VM load.
 
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-ALERT=""
+TCP socket not being closed if Netty's Channel is closed but underlying SocketChannel is still held by JVM or GC.
 
-# Calculate committed % of total RAM
-COMMITTED_PERCENT=$(( 100 * COMMITTED_AS_KB / TOTAL_RAM_KB ))
+Upgrade Netty   Fixes old connection management bugs
+Netty 4.1.18.Final is old (2017!)
+That version is known to have some bugs around socket teardown. Upgrade to at least Netty 4.1.100.Final+ if possible — newer versions handle edge cases in proxy design much better.
 
-# Check swap usage
-if [ "$SWAP_USED_MB" -gt "$MAX_SWAP_MB" ]; then
-  ALERT+="[WARNING] High swap usage: ${SWAP_USED_MB} MB used\n"
-fi
 
-# Check overcommit
-if [ "$COMMITTED_PERCENT" -gt "$MAX_COMMITTED_PERCENT" ]; then
-  ALERT+="[WARNING] Committed_AS is ${COMMITTED_PERCENT}% of RAM\n"
-fi
-
-# Check for recent OOM events
-OOM_EVENTS=$(dmesg -T | grep -i 'out of memory' | tail -n 3)
-if [ -n "$OOM_EVENTS" ]; then
-  ALERT+="[WARNING] Recent OOM events detected:\n${OOM_EVENTS}\n"
-fi
-
-# Log or output
-if [ -n "$ALERT" ]; then
-  echo -e "\n$TIMESTAMP\n$ALERT" | tee -a "$LOGFILE"
-else
-  echo "$TIMESTAMP - Memory check OK" >> "$LOGFILE"
-fi
