@@ -264,25 +264,51 @@ shardMembers.forEach(m => {
 
 --------------------------
 
-HttpClient leaving connections in CLOSE_WAIT state until Java process ends
-https://bugs.openjdk.org/browse/JDK-8221395?utm_source=chatgpt.com
 
-CLOSE_WAIT problem and high VM usage could very well stem from the Netty proxy design
-Mutual Close Loop / Infinite Recursion
-This pattern creates a feedback loop:
+1. Asymmetric Close Timing or Missing .shutdownOutput()
+TCP CLOSE_WAIT happens when:
 
-Frontend channel becomes inactive → triggers channelInactive() → closes backend channel.
-Backend channel closes → triggers its own channelInactive() → closes frontend channel again.
-Which may result in:
-Re-entering the same close logic.
-Sockets not fully torn down.
-Channel stuck in CLOSE_WAIT if underlying socket isn't properly closed.
-Thread stack pressure or increased memory/VM load.
+The remote peer closed its connection, but your side didn’t fully close the local socket yet (especially not the output stream).
+In Netty, calling .close() only schedules the close. You might need to explicitly shut down both input/output sides to trigger proper TCP teardown.
 
-TCP socket not being closed if Netty's Channel is closed but underlying SocketChannel is still held by JVM or GC.
+🔧 Fix: Explicit shutdown
+ctx.channel().shutdown().addListener(f -> ctx.channel().close());
+Or better:
 
-Upgrade Netty   Fixes old connection management bugs
-Netty 4.1.18.Final is old (2017!)
-That version is known to have some bugs around socket teardown. Upgrade to at least Netty 4.1.100.Final+ if possible — newer versions handle edge cases in proxy design much better.
+ctx.channel().shutdownOutput().addListener(f -> ctx.channel().close());
+
+2. Channel is already closed, but .close() is called again
+Redundant .close() calls on already-closed channels can cause undefined or delayed cleanup in TCP stack — leading to CLOSE_WAIT states being retained by OS.
+
+Use:
+
+if (channel != null && channel.isActive()) {
+    channel.close();
+}
+
+3. Non-closed pipeline handlers holding references
+Some handlers (e.g., HTTP/1.1 aggregators, encoders, etc.) can delay teardown if you don’t remove them on disconnect or error. That may keep the socket reference alive.
+
+Try:
+
+ctx.pipeline().remove(this);
+... or explicitly clean up all handlers on channelInactive.
+
+
+4. Channel leaks in event loop group
+Check that you shut down your EventLoopGroup correctly on app termination:
+
+eventLoopGroup.shutdownGracefully().sync();
+Otherwise, old connections may linger.
+
+Check lingering CLOSE_WAIT and owning PIDs
+sudo netstat -tanp | grep CLOSE_WAIT
+
+
+Match with Java threads
+Use lsof -i or jstack to correlate those with Java thread states:
+
+jstack <PID> | grep -A10 CLOSE_WAIT
+You’ll likely see sun.nio.ch.SocketChannelImpl.socketRead0() or similar.
 
 
