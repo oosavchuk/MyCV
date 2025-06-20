@@ -264,32 +264,52 @@ shardMembers.forEach(m => {
 
 --------------------------
 
-package main
+func DeleteInBatchesConcurrentWithSession(ctx context.Context, client *mongo.Client, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
+    session, err := client.StartSession()
+    if err != nil {
+        return err
+    }
+    defer session.EndSession(ctx)
 
-import (
-    "context"
-    "fmt"
-    "log"
-    "sync"
-    "time"
+    return mongo.WithSession(ctx, session, func(sc mongo.SessionContext) error {
+        // Keep-alive ticker
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
 
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/mongo"
-    "go.mongodb.org/mongo-driver/mongo/options"
-)
+        // Ping goroutine to keep session alive
+        done := make(chan struct{})
+        go func() {
+            for {
+                select {
+                case <-ticker.C:
+                    _ = client.Ping(sc, nil)
+                case <-done:
+                    return
+                }
+            }
+        }()
 
-func DeleteInBatchesConcurrent(ctx context.Context, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
+        err := deleteInBatchesConcurrentInternal(sc, coll, filter, batchSize, concurrency)
+
+        // Stop the ping goroutine
+        close(done)
+        return err
+    })
+}
+
+
+func deleteInBatchesConcurrentInternal(ctx context.Context, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
     var wg sync.WaitGroup
     docChan := make(chan []bson.M, concurrency)
     errChan := make(chan error, concurrency)
     countChan := make(chan int, concurrency)
+
     cursor, err := coll.Find(ctx, filter, options.Find().SetBatchSize(int32(batchSize)).SetSort(bson.D{{Key: "_id", Value: 1}}))
     if err != nil {
         return err
     }
     defer cursor.Close(ctx)
 
-    // Reader goroutine
     go func() {
         batch := make([]bson.M, 0, batchSize)
         for cursor.Next(ctx) {
@@ -310,7 +330,6 @@ func DeleteInBatchesConcurrent(ctx context.Context, coll *mongo.Collection, filt
         close(docChan)
     }()
 
-    // Workers
     for i := 0; i < concurrency; i++ {
         wg.Add(1)
         go func(workerID int) {
@@ -332,7 +351,6 @@ func DeleteInBatchesConcurrent(ctx context.Context, coll *mongo.Collection, filt
         }(i)
     }
 
-    // Wait and close
     go func() {
         wg.Wait()
         close(errChan)
@@ -356,23 +374,3 @@ func DeleteInBatchesConcurrent(ctx context.Context, coll *mongo.Collection, filt
         }
     }
 }
-
-func main() {
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-    defer cancel()
-
-    clientOpts := options.Client().ApplyURI("mongodb://localhost:27017")
-    client, err := mongo.Connect(ctx, clientOpts)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    coll := client.Database("yourdb").Collection("yourcollection")
-    filter := bson.M{"status": "inactive"}
-
-    err = DeleteInBatchesConcurrent(ctx, coll, filter, 500, 4)
-    if err != nil {
-        log.Fatalf("Error: %v", err)
-    }
-}
-
