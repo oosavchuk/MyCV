@@ -264,8 +264,6 @@ shardMembers.forEach(m => {
 
 --------------------------
 
-
-
 package main
 
 import (
@@ -280,102 +278,101 @@ import (
     "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// DeleteInBatchesConcurrent deletes matching documents in concurrent batches.
-func DeleteInBatchesConcurrent(ctx context.Context, client *mongo.Client, dbName, collName string, filter bson.M, batchSize int, concurrency int) error {
-    session, err := client.StartSession()
+func DeleteInBatchesConcurrent(ctx context.Context, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
+    var wg sync.WaitGroup
+    docChan := make(chan []bson.M, concurrency)
+    errChan := make(chan error, concurrency)
+    countChan := make(chan int, concurrency)
+    cursor, err := coll.Find(ctx, filter, options.Find().SetBatchSize(int32(batchSize)).SetSort(bson.D{{Key: "_id", Value: 1}}))
     if err != nil {
-        return fmt.Errorf("start session failed: %w", err)
+        return err
     }
-    defer session.EndSession(ctx)
+    defer cursor.Close(ctx)
 
-    return mongo.WithSession(ctx, session, func(sc mongo.SessionContext) error {
-        ticker := time.NewTicker(5 * time.Minute)
-        defer ticker.Stop()
-
-        // Keep session alive
-        go func() {
-            for range ticker.C {
-                _ = client.Database("admin").RunCommand(sc, bson.D{{Key: "ping", Value: 1}}).Err()
+    // Reader goroutine
+    go func() {
+        batch := make([]bson.M, 0, batchSize)
+        for cursor.Next(ctx) {
+            var doc bson.M
+            if err := cursor.Decode(&doc); err != nil {
+                errChan <- err
+                return
             }
-        }()
-
-        collection := client.Database(dbName).Collection(collName)
-        idChan := make(chan interface{}, batchSize*concurrency)
-        wg := sync.WaitGroup{}
-
-        // Worker goroutines
-        for i := 0; i < concurrency; i++ {
-            wg.Add(1)
-            go func() {
-                defer wg.Done()
-                var ids []interface{}
-                for id := range idChan {
-                    ids = append(ids, id)
-                    if len(ids) == batchSize {
-                        deleteBatch(sc, collection, ids)
-                        ids = nil
-                    }
-                }
-                if len(ids) > 0 {
-                    deleteBatch(sc, collection, ids)
-                }
-            }()
-        }
-
-        // Producer: Fetch IDs and push into idChan
-        for {
-            cursor, err := collection.Find(sc, filter, options.Find().SetLimit(int64(batchSize*concurrency)).SetProjection(bson.M{"_id": 1}))
-            if err != nil {
-                return fmt.Errorf("find failed: %w", err)
-            }
-
-            count := 0
-            for cursor.Next(sc) {
-                var doc bson.M
-                if err := cursor.Decode(&doc); err != nil {
-                    cursor.Close(sc)
-                    return fmt.Errorf("decode failed: %w", err)
-                }
-                idChan <- doc["_id"]
-                count++
-            }
-            cursor.Close(sc)
-
-            if count == 0 {
-                break
+            batch = append(batch, doc)
+            if len(batch) >= batchSize {
+                docChan <- batch
+                batch = make([]bson.M, 0, batchSize)
             }
         }
+        if len(batch) > 0 {
+            docChan <- batch
+        }
+        close(docChan)
+    }()
 
-        close(idChan)
+    // Workers
+    for i := 0; i < concurrency; i++ {
+        wg.Add(1)
+        go func(workerID int) {
+            defer wg.Done()
+            for batch := range docChan {
+                ids := make([]interface{}, len(batch))
+                for i, doc := range batch {
+                    ids[i] = doc["_id"]
+                }
+                res, err := coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
+                if err != nil {
+                    errChan <- err
+                    return
+                }
+                deleted := int(res.DeletedCount)
+                fmt.Printf("Worker %d deleted %d documents\n", workerID, deleted)
+                countChan <- deleted
+            }
+        }(i)
+    }
+
+    // Wait and close
+    go func() {
         wg.Wait()
+        close(errChan)
+        close(countChan)
+    }()
 
-        return nil
-    })
-}
-
-// Helper to delete a batch of documents by _id
-func deleteBatch(ctx context.Context, coll *mongo.Collection, ids []interface{}) {
-    _, err := coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
-    if err != nil {
-        log.Printf("Error deleting batch: %v", err)
-    } else {
-        log.Printf("Deleted %d documents", len(ids))
+    var totalDeleted int
+    for {
+        select {
+        case err, ok := <-errChan:
+            if ok && err != nil {
+                return err
+            }
+        case count, ok := <-countChan:
+            if ok {
+                totalDeleted += count
+            } else {
+                fmt.Printf("Total deleted documents: %d\n", totalDeleted)
+                return nil
+            }
+        }
     }
 }
-
-
 
 func main() {
-    ctx := context.Background()
-    client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+    defer cancel()
+
+    clientOpts := options.Client().ApplyURI("mongodb://localhost:27017")
+    client, err := mongo.Connect(ctx, clientOpts)
     if err != nil {
         log.Fatal(err)
     }
 
-    filter := bson.M{"status": "obsolete"}
-    err = DeleteInBatchesConcurrent(ctx, client, "testdb", "mycollection", filter, 500, 4)
+    coll := client.Database("yourdb").Collection("yourcollection")
+    filter := bson.M{"status": "inactive"}
+
+    err = DeleteInBatchesConcurrent(ctx, coll, filter, 500, 4)
     if err != nil {
-        log.Fatal(err)
+        log.Fatalf("Error: %v", err)
     }
 }
 
