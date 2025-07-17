@@ -263,114 +263,34 @@ shardMembers.forEach(m => {
 
 
 --------------------------
+const fs = require('fs'); // works in mongosh >= 1.1.0
 
-func DeleteInBatchesConcurrentWithSession(ctx context.Context, client *mongo.Client, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
-    session, err := client.StartSession()
-    if err != nil {
-        return err
+const cursor = db.info.find();
+const output = [];
+
+while (cursor.hasNext()) {
+  const doc = cursor.next();
+
+  const transformedMeta = {};
+  (doc.meta || []).forEach(entry => {
+    if (entry.key && entry.value !== undefined) {
+      transformedMeta[entry.key] = entry.value;
     }
-    defer session.EndSession(ctx)
+  });
 
-    return mongo.WithSession(ctx, session, func(sc mongo.SessionContext) error {
-        // Keep-alive ticker
-        ticker := time.NewTicker(30 * time.Second)
-        defer ticker.Stop()
+  const newDoc = {
+    _id: doc._id,
+    meta: transformedMeta
+  };
 
-        // Ping goroutine to keep session alive
-        done := make(chan struct{})
-        go func() {
-            for {
-                select {
-                case <-ticker.C:
-                    _ = client.Ping(sc, nil)
-                case <-done:
-                    return
-                }
-            }
-        }()
-
-        err := deleteInBatchesConcurrentInternal(sc, coll, filter, batchSize, concurrency)
-
-        // Stop the ping goroutine
-        close(done)
-        return err
-    })
+  output.push(newDoc);
 }
 
+// Write to a file
+fs.writeFileSync("transformed_output.json", JSON.stringify(output, null, 2));
 
-func deleteInBatchesConcurrentInternal(ctx context.Context, coll *mongo.Collection, filter bson.M, batchSize int, concurrency int) error {
-    var wg sync.WaitGroup
-    docChan := make(chan []bson.M, concurrency)
-    errChan := make(chan error, concurrency)
-    countChan := make(chan int, concurrency)
 
-    cursor, err := coll.Find(ctx, filter, options.Find().SetBatchSize(int32(batchSize)).SetSort(bson.D{{Key: "_id", Value: 1}}))
-    if err != nil {
-        return err
-    }
-    defer cursor.Close(ctx)
+// mongosh --host <mongos> -u <user> -p <pwd> --authenticationDatabase admin transform_meta.js
 
-    go func() {
-        batch := make([]bson.M, 0, batchSize)
-        for cursor.Next(ctx) {
-            var doc bson.M
-            if err := cursor.Decode(&doc); err != nil {
-                errChan <- err
-                return
-            }
-            batch = append(batch, doc)
-            if len(batch) >= batchSize {
-                docChan <- batch
-                batch = make([]bson.M, 0, batchSize)
-            }
-        }
-        if len(batch) > 0 {
-            docChan <- batch
-        }
-        close(docChan)
-    }()
 
-    for i := 0; i < concurrency; i++ {
-        wg.Add(1)
-        go func(workerID int) {
-            defer wg.Done()
-            for batch := range docChan {
-                ids := make([]interface{}, len(batch))
-                for i, doc := range batch {
-                    ids[i] = doc["_id"]
-                }
-                res, err := coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
-                if err != nil {
-                    errChan <- err
-                    return
-                }
-                deleted := int(res.DeletedCount)
-                fmt.Printf("Worker %d deleted %d documents\n", workerID, deleted)
-                countChan <- deleted
-            }
-        }(i)
-    }
 
-    go func() {
-        wg.Wait()
-        close(errChan)
-        close(countChan)
-    }()
-
-    var totalDeleted int
-    for {
-        select {
-        case err, ok := <-errChan:
-            if ok && err != nil {
-                return err
-            }
-        case count, ok := <-countChan:
-            if ok {
-                totalDeleted += count
-            } else {
-                fmt.Printf("Total deleted documents: %d\n", totalDeleted)
-                return nil
-            }
-        }
-    }
-}
