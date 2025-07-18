@@ -263,10 +263,22 @@ shardMembers.forEach(m => {
 
 
 --------------------------
-const fs = require('fs'); // works in mongosh >= 1.1.0
+const fs = require('fs');
+const indexName = "your-index-name";  // Replace with your actual index name
+const outputFile = "bulk_output.json";
+
+function cleanValue(val) {
+  if (typeof val === 'object' && val !== null) {
+    if ('$numberLong' in val) return parseInt(val['$numberLong'], 10);
+    if ('$date' in val) return new Date(val['$date']).toISOString();
+    for (const key in val) val[key] = cleanValue(val[key]);
+    return val;
+  }
+  return val;
+}
 
 const cursor = db.info.find();
-const output = [];
+const lines = [];
 
 while (cursor.hasNext()) {
   const doc = cursor.next();
@@ -279,18 +291,13 @@ while (cursor.hasNext()) {
   });
 
   const newDoc = {
-    _id: doc._id,
     meta: transformedMeta
   };
 
-  output.push(newDoc);
+  lines.push(JSON.stringify({ index: { _index: indexName } }));
+  lines.push(JSON.stringify(cleanValue(newDoc)));
 }
 
-// Write to a file
-fs.writeFileSync("transformed_output.json", JSON.stringify(output, null, 2));
-
-
-// mongosh --host <mongos> -u <user> -p <pwd> --authenticationDatabase admin transform_meta.js
-
+fs.writeFileSync(outputFile, lines.join('\n') + '\n');
 
 
