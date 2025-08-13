@@ -321,4 +321,93 @@ Indexes: Ensure that indexes support your query patterns efficiently, especially
 Capacity Planning: Monitor your shards to ensure they have enough capacity to handle growth evenly.
 Security: Ensure that your sharded cluster is secure, particularly if some shards are located in different physical locations or network segments.
 
+---------
+- name: Configure Storm
+  hosts: all
+  become: yes
+  vars:
+    CLOUD_ENV: dev
+    PORT: 6700
+    DOWNLOAD_DIR: /opt/downloads
+    NEXUS_HOST: nexus.example.com
+    storm_conf_path: storm.conf
+  tasks:
+
+    - name: Read storm.conf file
+      slurp:
+        path: "{{ storm_conf_path }}"
+      register: storm_conf_raw
+
+    - name: Parse storm.conf lines
+      set_fact:
+        storm_conf_lines: "{{ storm_conf_raw.content | b64decode | splitlines }}"
+
+    - name: Find matching host config line
+      set_fact:
+        host_conf_line: "{{ item }}"
+      loop: "{{ storm_conf_lines }}"
+      when: item is search(inventory_hostname + "=")
+
+    - name: Fail if no matching host found
+      fail:
+        msg: "No matching host entry found for {{ inventory_hostname }} in storm.conf"
+      when: host_conf_line is not defined
+
+    - name: Extract CLOUD_ENV, role, num, and tier
+      set_fact:
+        CLOUD_ENV: "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[0] }}"
+        role:       "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[1] }}"
+        num:        "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[2] | int }}"
+        tier:       "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[3] }}"
+
+    - name: Generate YAML list of supervisor slots ports
+      set_fact:
+        OUTPUT: "{{ range(PORT, PORT + num) | map('string') | list }}"
+
+    - name: Update supervisor slots ports in storm.yaml
+      replace:
+        path: "{{ CLOUD_ENV }}/storm.yaml"
+        regexp: 'supervisor\.slots\.ports:.*'
+        replace: "supervisor.slots.ports: {{ OUTPUT | to_nice_yaml(indent=2) | trim }}"
+
+    - name: Update tier in storm.yaml
+      replace:
+        path: "{{ CLOUD_ENV }}/storm.yaml"
+        regexp: 'tier: ".*"'
+        replace: 'tier: "{{ tier }}"'
+
+    - name: Append UI filter to storm.yaml
+      lineinfile:
+        path: "{{ CLOUD_ENV }}/storm.yaml"
+        line: 'ui.filter: "org-apache storm security auth BasicAuthFilter"'
+        create: yes
+
+    - name: Create symbolic link to storm.yaml
+      file:
+        src: "{{ CLOUD_ENV }}/storm.yaml"
+        dest: "storm.yaml"
+        state: link
+        force: yes
+
+    - name: Download basic-auth-filter.jar
+      get_url:
+        url: "https://{{ NEXUS_HOST }}:8443/nexus/content/repositories/thirdparty/org/apache/storm/apache/basic-auth-filter.jar"
+        dest: "{{ DOWNLOAD_DIR }}/current/lib/basic-auth-filter.jar"
+        validate_certs: no
+
+    - name: Append UI credentials
+      blockinfile:
+        path: "{{ DOWNLOAD_DIR }}/current/conf/ui-credentials.properties"
+        block: |
+          stormadmin:111:admin
+          readonly:readonly:readonly
+        create: yes
+        marker: ""
+      environment:
+        no_proxy: "{{ NEXUS_HOST }}"
+
+    - name: Set permissions on UI credentials file
+      file:
+        path: "{{ DOWNLOAD_DIR }}/current/conf/ui-credentials.properties"
+        mode: '0600'
 
