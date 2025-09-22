@@ -322,92 +322,147 @@ Capacity Planning: Monitor your shards to ensure they have enough capacity to ha
 Security: Ensure that your sharded cluster is secure, particularly if some shards are located in different physical locations or network segments.
 
 ---------
-- name: Configure Storm
-  hosts: all
-  become: yes
-  vars:
-    CLOUD_ENV: dev
-    PORT: 6700
-    DOWNLOAD_DIR: /opt/downloads
-    NEXUS_HOST: nexus.example.com
-    storm_conf_path: storm.conf
-  tasks:
 
-    - name: Read storm.conf file
-      slurp:
-        path: "{{ storm_conf_path }}"
-      register: storm_conf_raw
+// ======= CONFIGURATION =======
+const dbName = "your_db";
+const collName = "your_collection";
+const indexSpec = { email: 1 };           // Index fields
+const indexOptions = { name: "email_1" }; // Index name
+const releaseDB = "releasedb";
+const releaseColl = "indexes";            // Collection to store released indexes
+// ==============================
 
-    - name: Parse storm.conf lines
-      set_fact:
-        storm_conf_lines: "{{ storm_conf_raw.content | b64decode | splitlines }}"
+// Get DB references
+const mainDB = db.getSiblingDB(dbName);
+const releaseDBRef = db.getSiblingDB(releaseDB);
 
-    - name: Find matching host config line
-      set_fact:
-        host_conf_line: "{{ item }}"
-      loop: "{{ storm_conf_lines }}"
-      when: item is search(inventory_hostname + "=")
+// ----- STEP 1: Check release DB -----
+const existingRelease = releaseDBRef[releaseColl].findOne({
+  db: dbName,
+  collection: collName,
+  indexName: indexOptions.name
+});
 
-    - name: Fail if no matching host found
-      fail:
-        msg: "No matching host entry found for {{ inventory_hostname }} in storm.conf"
-      when: host_conf_line is not defined
+if (existingRelease) {
+  print(`ℹ️ Index "${indexOptions.name}" already recorded in release DB. Skipping creation.`);
+  quit(0); // Exit success
+}
 
-    - name: Extract CLOUD_ENV, role, num, and tier
-      set_fact:
-        CLOUD_ENV: "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[0] }}"
-        role:       "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[1] }}"
-        num:        "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[2] | int }}"
-        tier:       "{{ host_conf_line.split('=')[1].strip(\"'\").split(';')[3] }}"
+// ----- STEP 2: Check if index exists -----
+function indexExists(coll, name) {
+  return coll.getIndexes().some(idx => idx.name === name);
+}
 
-    - name: Generate YAML list of supervisor slots ports
-      set_fact:
-        OUTPUT: "{{ range(PORT, PORT + num) | map('string') | list }}"
+if (!indexExists(mainDB[collName], indexOptions.name)) {
+  print(`🔨 Creating index "${indexOptions.name}"...`);
+  mainDB[collName].createIndex(indexSpec, indexOptions);
+} else {
+  print(`✅ Index "${indexOptions.name}" already exists in MongoDB.`);
+}
 
-    - name: Update supervisor slots ports in storm.yaml
-      replace:
-        path: "{{ CLOUD_ENV }}/storm.yaml"
-        regexp: 'supervisor\.slots\.ports:.*'
-        replace: "supervisor.slots.ports: {{ OUTPUT | to_nice_yaml(indent=2) | trim }}"
+// ----- STEP 3: Validate index -----
+print(`🔍 Validating index "${indexOptions.name}"...`);
+const validateResult = mainDB.runCommand({ validate: collName, full: true });
 
-    - name: Update tier in storm.yaml
-      replace:
-        path: "{{ CLOUD_ENV }}/storm.yaml"
-        regexp: 'tier: ".*"'
-        replace: 'tier: "{{ tier }}"'
+if (!validateResult.ok) {
+  print(`❌ Validation failed: ${tojson(validateResult)}`);
+  quit(1); // Exit with error
+}
 
-    - name: Append UI filter to storm.yaml
-      lineinfile:
-        path: "{{ CLOUD_ENV }}/storm.yaml"
-        line: 'ui.filter: "org-apache storm security auth BasicAuthFilter"'
-        create: yes
+print(`✅ Validation successful.`);
 
-    - name: Create symbolic link to storm.yaml
-      file:
-        src: "{{ CLOUD_ENV }}/storm.yaml"
-        dest: "storm.yaml"
-        state: link
-        force: yes
+// ----- STEP 4: Store in release DB -----
+releaseDBRef[releaseColl].insertOne({
+  db: dbName,
+  collection: collName,
+  indexName: indexOptions.name,
+  indexSpec: indexSpec,
+  createdAt: new Date()
+});
 
-    - name: Download basic-auth-filter.jar
-      get_url:
-        url: "https://{{ NEXUS_HOST }}:8443/nexus/content/repositories/thirdparty/org/apache/storm/apache/basic-auth-filter.jar"
-        dest: "{{ DOWNLOAD_DIR }}/current/lib/basic-auth-filter.jar"
-        validate_certs: no
+print(`📦 Index "${indexOptions.name}" info stored in release DB.`);
+quit(0);
 
-    - name: Append UI credentials
-      blockinfile:
-        path: "{{ DOWNLOAD_DIR }}/current/conf/ui-credentials.properties"
-        block: |
-          stormadmin:111:admin
-          readonly:readonly:readonly
-        create: yes
-        marker: ""
-      environment:
-        no_proxy: "{{ NEXUS_HOST }}"
+//-----------------
 
-    - name: Set permissions on UI credentials file
-      file:
-        path: "{{ DOWNLOAD_DIR }}/current/conf/ui-credentials.properties"
-        mode: '0600'
+function explainExecStats(collName, query, projection = {}) {
+  if (!collName || typeof collName !== "string") {
+    throw new Error("First argument must be the collection name as a string");
+  }
+  return db.getCollection(collName)
+           .find(query || {}, projection)
+           .explain("executionStats");
+}
+
+// Simple query
+explainExecStats("users", { email: "test@example.com" });
+
+// With projection
+explainExecStats("users", { status: "active" }, { name: 1, email: 1 });
+
+# =========================
+# Cluster & Node Basics
+# =========================
+cluster.name: my-es-cluster
+node.name: ${HOSTNAME}
+path.data: /var/lib/elasticsearch
+path.logs: /var/log/elasticsearch
+network.host: 0.0.0.0
+discovery.seed_hosts: ["es-master1", "es-master2", "es-master3"]
+cluster.initial_master_nodes: ["es-master1", "es-master2", "es-master3"]
+
+# =========================
+# Node Roles (dedicated masters recommended)
+# =========================
+# For master nodes:
+# node.roles: [ master ]
+# For data nodes:
+# node.roles: [ data, ingest ]
+
+# =========================
+# JVM Heap & Memory
+# =========================
+# Adjust for your system - keep Xms = Xmx, use max 50% of available RAM (<= 30GB)
+# Set in jvm.options, not here. Example:
+# -Xms8g
+# -Xmx8g
+
+bootstrap.memory_lock: true  # Prevent JVM heap from swapping
+
+# =========================
+# Cluster State Performance
+# =========================
+# Reduce chance of master being overloaded by shard relocation churn
+cluster.routing.allocation.node_concurrent_recoveries: 2
+cluster.routing.allocation.node_initial_primaries_recoveries: 2
+
+# Delay shard reallocation for transient node failures (avoid thrashing)
+index.unassigned.node_left.delayed_timeout: 5m
+
+# Avoid too many concurrent snapshots/restores
+cluster.routing.allocation.cluster_concurrent_rebalance: 2
+
+# =========================
+# Indexing Performance
+# =========================
+# Flush less aggressively to reduce disk I/O under heavy indexing
+indices.memory.index_buffer_size: 20%
+index.translog.flush_threshold_size: 512mb
+index.refresh_interval: 30s  # can be overridden per-index
+
+# =========================
+# Thread Pool Tuning
+# =========================
+thread_pool.write.queue_size: 500
+thread_pool.search.queue_size: 2000
+thread_pool.bulk.queue_size: 500
+
+# =========================
+# Monitoring
+# =========================
+http.max_content_length: 200mb
+action.destructive_requires_name: true
+
+
+
 
