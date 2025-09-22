@@ -322,147 +322,49 @@ Capacity Planning: Monitor your shards to ensure they have enough capacity to ha
 Security: Ensure that your sharded cluster is secure, particularly if some shards are located in different physical locations or network segments.
 
 ---------
+#!/usr/bin/env bash
+# Fix indices stuck in ILM error step by retrying or moving them to complete step
+# Requires: jq, curl
 
-// ======= CONFIGURATION =======
-const dbName = "your_db";
-const collName = "your_collection";
-const indexSpec = { email: 1 };           // Index fields
-const indexOptions = { name: "email_1" }; // Index name
-const releaseDB = "releasedb";
-const releaseColl = "indexes";            // Collection to store released indexes
-// ==============================
+ES_HOST="http://localhost:9200"
+AUTH="-u elastic:your_password"  # Remove or adjust if no auth needed
 
-// Get DB references
-const mainDB = db.getSiblingDB(dbName);
-const releaseDBRef = db.getSiblingDB(releaseDB);
+echo "🔍 Fetching indices in ILM error step..."
+ERROR_INDICES=$(curl -s $AUTH "$ES_HOST/_all/_ilm/explain" | jq -r '
+  .indices
+  | to_entries[]
+  | select(.value.step_info != null)
+  | select(.value.step == "ERROR")
+  | .key')
 
-// ----- STEP 1: Check release DB -----
-const existingRelease = releaseDBRef[releaseColl].findOne({
-  db: dbName,
-  collection: collName,
-  indexName: indexOptions.name
-});
+if [[ -z "$ERROR_INDICES" ]]; then
+  echo "✅ No indices in ILM error step found."
+  exit 0
+fi
 
-if (existingRelease) {
-  print(`ℹ️ Index "${indexOptions.name}" already recorded in release DB. Skipping creation.`);
-  quit(0); // Exit success
-}
+for index in $ERROR_INDICES; do
+  echo "⚠️ Index $index is in ILM error step. Retrying..."
 
-// ----- STEP 2: Check if index exists -----
-function indexExists(coll, name) {
-  return coll.getIndexes().some(idx => idx.name === name);
-}
+  RETRY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $AUTH -X POST "$ES_HOST/$index/_ilm/retry")
+  if [[ "$RETRY_STATUS" == "200" ]]; then
+    echo "✅ Successfully retried ILM for $index"
+    continue
+  fi
 
-if (!indexExists(mainDB[collName], indexOptions.name)) {
-  print(`🔨 Creating index "${indexOptions.name}"...`);
-  mainDB[collName].createIndex(indexSpec, indexOptions);
-} else {
-  print(`✅ Index "${indexOptions.name}" already exists in MongoDB.`);
-}
+  echo "❌ Retry failed for $index. Forcing move to complete step..."
+  PHASE=$(curl -s $AUTH "$ES_HOST/$index/_ilm/explain" | jq -r '.indices["'$index'"].phase')
 
-// ----- STEP 3: Validate index -----
-print(`🔍 Validating index "${indexOptions.name}"...`);
-const validateResult = mainDB.runCommand({ validate: collName, full: true });
+  if [[ -z "$PHASE" || "$PHASE" == "null" ]]; then
+    echo "⚠️ Unable to determine current phase for $index, skipping..."
+    continue
+  fi
 
-if (!validateResult.ok) {
-  print(`❌ Validation failed: ${tojson(validateResult)}`);
-  quit(1); // Exit with error
-}
+  curl -s -X POST $AUTH "$ES_HOST/$index/_ilm/move" -H 'Content-Type: application/json' -d "{
+    \"current_step\": { \"phase\": \"$PHASE\", \"action\": \"complete\", \"name\": \"complete\" },
+    \"next_step\":    { \"phase\": \"$PHASE\", \"action\": \"complete\", \"name\": \"complete\" }
+  }" | jq .
 
-print(`✅ Validation successful.`);
+  echo "✅ Forced $index to complete step."
+done
 
-// ----- STEP 4: Store in release DB -----
-releaseDBRef[releaseColl].insertOne({
-  db: dbName,
-  collection: collName,
-  indexName: indexOptions.name,
-  indexSpec: indexSpec,
-  createdAt: new Date()
-});
-
-print(`📦 Index "${indexOptions.name}" info stored in release DB.`);
-quit(0);
-
-//-----------------
-
-function explainExecStats(collName, query, projection = {}) {
-  if (!collName || typeof collName !== "string") {
-    throw new Error("First argument must be the collection name as a string");
-  }
-  return db.getCollection(collName)
-           .find(query || {}, projection)
-           .explain("executionStats");
-}
-
-// Simple query
-explainExecStats("users", { email: "test@example.com" });
-
-// With projection
-explainExecStats("users", { status: "active" }, { name: 1, email: 1 });
-
-# =========================
-# Cluster & Node Basics
-# =========================
-cluster.name: my-es-cluster
-node.name: ${HOSTNAME}
-path.data: /var/lib/elasticsearch
-path.logs: /var/log/elasticsearch
-network.host: 0.0.0.0
-discovery.seed_hosts: ["es-master1", "es-master2", "es-master3"]
-cluster.initial_master_nodes: ["es-master1", "es-master2", "es-master3"]
-
-# =========================
-# Node Roles (dedicated masters recommended)
-# =========================
-# For master nodes:
-# node.roles: [ master ]
-# For data nodes:
-# node.roles: [ data, ingest ]
-
-# =========================
-# JVM Heap & Memory
-# =========================
-# Adjust for your system - keep Xms = Xmx, use max 50% of available RAM (<= 30GB)
-# Set in jvm.options, not here. Example:
-# -Xms8g
-# -Xmx8g
-
-bootstrap.memory_lock: true  # Prevent JVM heap from swapping
-
-# =========================
-# Cluster State Performance
-# =========================
-# Reduce chance of master being overloaded by shard relocation churn
-cluster.routing.allocation.node_concurrent_recoveries: 2
-cluster.routing.allocation.node_initial_primaries_recoveries: 2
-
-# Delay shard reallocation for transient node failures (avoid thrashing)
-index.unassigned.node_left.delayed_timeout: 5m
-
-# Avoid too many concurrent snapshots/restores
-cluster.routing.allocation.cluster_concurrent_rebalance: 2
-
-# =========================
-# Indexing Performance
-# =========================
-# Flush less aggressively to reduce disk I/O under heavy indexing
-indices.memory.index_buffer_size: 20%
-index.translog.flush_threshold_size: 512mb
-index.refresh_interval: 30s  # can be overridden per-index
-
-# =========================
-# Thread Pool Tuning
-# =========================
-thread_pool.write.queue_size: 500
-thread_pool.search.queue_size: 2000
-thread_pool.bulk.queue_size: 500
-
-# =========================
-# Monitoring
-# =========================
-http.max_content_length: 200mb
-action.destructive_requires_name: true
-
-
-
-
+echo "🎯 Done. Verify with: curl -s $ES_HOST/_all/_ilm/explain | jq"
