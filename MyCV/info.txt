@@ -323,48 +323,38 @@ Security: Ensure that your sharded cluster is secure, particularly if some shard
 
 ---------
 #!/usr/bin/env bash
-# Fix indices stuck in ILM error step by retrying or moving them to complete step
-# Requires: jq, curl
-
 ES_HOST="http://localhost:9200"
-AUTH="-u elastic:your_password"  # Remove or adjust if no auth needed
+AUTH="-u elastic:your_password"
 
-echo "🔍 Fetching indices in ILM error step..."
-ERROR_INDICES=$(curl -s $AUTH "$ES_HOST/_all/_ilm/explain" | jq -r '
-  .indices
-  | to_entries[]
-  | select(.value.step_info != null)
+ERROR_INDICES=$(curl -s $AUTH "${ES_HOST%/}/_ilm/explain" | jq -r '
+  .indices | to_entries[]
   | select(.value.step == "ERROR")
   | .key')
 
-if [[ -z "$ERROR_INDICES" ]]; then
-  echo "✅ No indices in ILM error step found."
-  exit 0
-fi
-
 for index in $ERROR_INDICES; do
-  echo "⚠️ Index $index is in ILM error step. Retrying..."
+  echo "⚠️ Processing $index..."
+  
+  # Attempt ILM Move
+  MOVE_RESP=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST $AUTH "${ES_HOST%/}/_ilm/move" \
+    -H 'Content-Type: application/json' \
+    -d "{
+      \"index\": \"$index\",
+      \"current_step\": { \"phase\": \"hot\", \"action\": \"complete\", \"name\": \"complete\" },
+      \"next_step\":    { \"phase\": \"hot\", \"action\": \"complete\", \"name\": \"complete\" }
+    }")
 
-  RETRY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $AUTH -X POST "$ES_HOST/$index/_ilm/retry")
-  if [[ "$RETRY_STATUS" == "200" ]]; then
-    echo "✅ Successfully retried ILM for $index"
+  if [[ "$MOVE_RESP" == "200" ]]; then
+    echo "✅ Successfully forced ILM move for $index"
     continue
   fi
 
-  echo "❌ Retry failed for $index. Forcing move to complete step..."
-  PHASE=$(curl -s $AUTH "$ES_HOST/$index/_ilm/explain" | jq -r '.indices["'$index'"].phase')
+  echo "❌ _ilm/move failed for $index. Removing ILM policy..."
+  curl -s -X PUT $AUTH "${ES_HOST%/}/${index}/_settings" \
+    -H 'Content-Type: application/json' \
+    -d '{"index.lifecycle.name": null}' > /dev/null
 
-  if [[ -z "$PHASE" || "$PHASE" == "null" ]]; then
-    echo "⚠️ Unable to determine current phase for $index, skipping..."
-    continue
-  fi
-
-  curl -s -X POST $AUTH "$ES_HOST/$index/_ilm/move" -H 'Content-Type: application/json' -d "{
-    \"current_step\": { \"phase\": \"$PHASE\", \"action\": \"complete\", \"name\": \"complete\" },
-    \"next_step\":    { \"phase\": \"$PHASE\", \"action\": \"complete\", \"name\": \"complete\" }
-  }" | jq .
-
-  echo "✅ Forced $index to complete step."
+  echo "🔄 Closing and reopening $index..."
+  curl -s -X POST $AUTH "${ES_HOST%/}/${index}/_close"
+  curl -s -X POST $AUTH "${ES_HOST%/}/${index}/_open"
 done
 
-echo "🎯 Done. Verify with: curl -s $ES_HOST/_all/_ilm/explain | jq"
