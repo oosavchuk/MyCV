@@ -358,3 +358,47 @@ for index in $ERROR_INDICES; do
   curl -s -X POST $AUTH "${ES_HOST%/}/${index}/_open"
 done
 
+------------
+#!/bin/bash
+
+check_and_set_limit() {
+    # Usage: check_and_set_limit "<user>" "<item>" "<type>" "<value>"
+    # Example: check_and_set_limit "*" "nofile" "hard" "65535"
+
+    local user="$1"
+    local item="$2"
+    local type="$3"   # soft or hard
+    local value="$4"
+
+    local conf_file="/etc/security/limits.d/99-custom.conf"
+
+    # Ensure file exists
+    if [ ! -f "$conf_file" ]; then
+        sudo touch "$conf_file"
+        sudo chmod 644 "$conf_file"
+    fi
+
+    # Check if the entry already exists
+    local current
+    current=$(awk -v u="$user" -v i="$item" -v t="$type" \
+        '$1==u && $2==t && $3==i {print $4}' "$conf_file")
+
+    if [ "$current" != "$value" ]; then
+        echo "Updating limit for user='$user' $type $item = $value (was ${current:-not set})"
+        # Remove existing line for same user/type/item
+        sudo sed -i "/^${user}[[:space:]]\+${type}[[:space:]]\+${item}[[:space:]]\+/d" "$conf_file"
+        # Add new value
+        echo -e "${user}\t${type}\t${item}\t${value}" | sudo tee -a "$conf_file" >/dev/null
+    else
+        echo "Limit OK: $user $type $item = $value"
+    fi
+}
+
+# Example usage:
+check_and_set_limit "*" "nofile" "soft" "10240"
+check_and_set_limit "*" "nofile" "hard" "65535"
+check_and_set_limit "appuser" "nproc" "soft" "4096"
+check_and_set_limit "appuser" "nproc" "hard" "8192"
+
+
+
