@@ -399,6 +399,71 @@ check_and_set_limit "*" "nofile" "soft" "10240"
 check_and_set_limit "*" "nofile" "hard" "65535"
 check_and_set_limit "appuser" "nproc" "soft" "4096"
 check_and_set_limit "appuser" "nproc" "hard" "8192"
+---------------
+import java.io.*;
+import java.nio.file.*;
+import java.security.*;
+import java.util.Base64;
+
+public class JavaSerializedKeyConverter {
+
+    public static void main(String[] args) throws Exception {
+        if (args.length != 1) {
+            System.out.println("Usage: java JavaSerializedKeyConverter <serialized_key_file>");
+            return;
+        }
+
+        String inputFile = args[0];
+
+        ObjectInputStream ois =
+                new ObjectInputStream(new FileInputStream(inputFile));
+
+        Object obj = ois.readObject();
+        ois.close();
+
+        if (obj instanceof PrivateKey) {
+            PrivateKey privateKey = (PrivateKey) obj;
+            exportPrivateKey(privateKey);
+        } else if (obj instanceof PublicKey) {
+            PublicKey publicKey = (PublicKey) obj;
+            exportPublicKey(publicKey);
+        } else {
+            System.out.println("Unsupported object type: " + obj.getClass());
+        }
+    }
+
+    private static void exportPrivateKey(PrivateKey key) throws Exception {
+        byte[] encoded = key.getEncoded();
+
+        Files.write(Paths.get("private.der"), encoded);
+        writePem("PRIVATE KEY", encoded, "private.pem");
+
+        System.out.println("Private key exported:");
+        System.out.println("  private.der (PKCS#8 DER)");
+        System.out.println("  private.pem (PKCS#8 PEM)");
+    }
+
+    private static void exportPublicKey(PublicKey key) throws Exception {
+        byte[] encoded = key.getEncoded();
+
+        Files.write(Paths.get("public.der"), encoded);
+        writePem("PUBLIC KEY", encoded, "public.pem");
+
+        System.out.println("Public key exported:");
+        System.out.println("  public.der (X.509 DER)");
+        System.out.println("  public.pem (X.509 PEM)");
+    }
+
+    private static void writePem(String type, byte[] data, String filename) throws Exception {
+        String base64 = Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(data);
+        String pem = "-----BEGIN " + type + "-----\n"
+                + base64
+                + "\n-----END " + type + "-----\n";
+
+        Files.write(Paths.get(filename), pem.getBytes());
+    }
+}
+
 
 
 
